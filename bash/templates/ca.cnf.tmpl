@@ -1,0 +1,67 @@
+# Rendered CA config for __NAME__. Tokens (__DIR__, __NAME__, __DEFAULT_DAYS__)
+# are substituted by lib/common.sh:render_ca_config. Do not edit tokens by hand;
+# edit the rendered store/<name>/openssl.cnf instead if you need a one-off tweak.
+
+[ ca ]
+default_ca = CA_default
+
+[ CA_default ]
+dir               = __DIR__
+certs             = $dir/certs
+new_certs_dir     = $dir/newcerts
+database          = $dir/index.txt
+serial            = $dir/serial
+private_key       = $dir/private/__NAME__.key.pem
+certificate       = $dir/certs/__NAME__.cert.pem
+RANDFILE          = $dir/private/.rand
+
+default_md        = sha256
+default_days      = __DEFAULT_DAYS__
+name_opt          = ca_default
+cert_opt          = ca_default
+copy_extensions   = copy
+policy            = policy_loose
+unique_subject    = no
+
+[ policy_loose ]
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+
+[ req ]
+default_bits        = 2048
+distinguished_name  = req_distinguished_name
+string_mask         = utf8only
+
+[ req_distinguished_name ]
+
+# NOTE: authorityKeyIdentifier below intentionally uses "keyid" only (no
+# "issuer"/serial). This tool is reissue-centric: every `reissue` gives the
+# signing CA a new serial via `openssl ca`, even without --rekey. Baking the
+# issuer's issuer-DN+serial into the AKI (the common "keyid:always,issuer"
+# recipe) would make every previously-issued child fail strict chain
+# verification the moment its parent CA is reissued, even though the
+# parent's key (and thus keyid) hasn't changed.
+
+[ v3_ca ]
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid
+basicConstraints       = critical, CA:true
+keyUsage                = critical, digitalSignature, cRLSign, keyCertSign
+
+[ v3_intermediate_ca ]
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid
+basicConstraints       = critical, CA:true
+keyUsage                = critical, digitalSignature, cRLSign, keyCertSign
+
+[ v3_server ]
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid
+basicConstraints       = CA:false
+keyUsage                = critical, digitalSignature, keyEncipherment
+extendedKeyUsage        = serverAuth

@@ -1,0 +1,16 @@
+# Rendered CSR config for a leaf (server) certificate request. __ALT_NAMES__
+# is substituted by lib/common.sh:render_leaf_config. The subject (CN/O/OU/...)
+# is passed on the openssl req command line via -subj, not in this file.
+
+[ req ]
+distinguished_name  = req_distinguished_name
+string_mask         = utf8only
+req_extensions      = req_ext
+
+[ req_distinguished_name ]
+
+[ req_ext ]
+subjectAltName = @alt_names
+
+[ alt_names ]
+__ALT_NAMES__

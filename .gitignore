@@ -1,0 +1,10 @@
+# Generated PKI data -- private keys, certs, and CA bookkeeping. Never commit
+# this: it's runtime output, not source, and it contains private key material.
+/store/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor/OS cruft
+.DS_Store
