@@ -57,6 +57,15 @@ store/<name>/
   index.txt, serial, newcerts/  # CA entities only (issuance bookkeeping)
 ```
 
+## Examples
+
+Nine full walkthroughs (real commands, real captured output) live under
+[`examples/`](examples/): multi-level CA chains, server cert variants
+(SAN/EC/RSA/subject fields/wildcards), reissue/rekey, cross-tool interop,
+the AD CS quirk simulation, signing externally-generated CSRs, and mTLS
+client-auth certs. See [`examples/README.md`](examples/README.md) for the
+full index.
+
 ## Commands
 
 ```
@@ -75,8 +84,10 @@ issue-server --name NAME --ca ISSUING_CA --cn CN
              [--adcs-quirk FIELD[,FIELD...]|all] [--eku client]
 ```
 Issues a leaf server certificate signed by `ISSUING_CA`. `--adcs-quirk`
-— see "Simulating real-world CA bugs" below. `--eku` — see "Client
-certificate authentication (mTLS)" below.
+force-encodes the named subject field(s) as PrintableString regardless of
+charset, reproducing a real-world Windows AD CS issuance bug — see
+[`examples/05-adcs-quirk-simulation`](examples/05-adcs-quirk-simulation/README.md).
+`--eku` — see "Client certificate authentication (mTLS)" below.
 
 ```
 sign-csr --name NAME --ca ISSUING_CA --csr PATH [--days N] [--eku client]
@@ -186,45 +197,6 @@ rejected for them above) since EKU is chainsmith-decided, not part of the
 submitted CSR. See
 [`examples/09-client-auth-eku`](examples/09-client-auth-eku/README.md).
 
-## Simulating real-world CA bugs
-
-Both tools' `issue-server`/`reissue` support
-`--adcs-quirk FIELD[,FIELD...]|all`, which force-encodes the named subject
-field(s) (`CN`, `O`, `OU`, `C`, `ST`, `L`) as ASN.1 PrintableString
-regardless of whether the value's characters actually fit that charset
-(PrintableString only allows `A-Z a-z 0-9 space ' ( ) + , - . / : = ?`).
-It's a one-off: it's not stored in `meta.conf`, so a later plain `reissue
-NAME` (no flag) produces a normal cert again. It only applies to server
-certs, not `init-ca`.
-
-This reproduces a real-world Windows AD CS issuance bug: such a CA can
-blindly re-encode a CSR's subject fields as PrintableString on issuance even
-when they contain disallowed characters (e.g. `&`), producing a certificate
-that's technically ASN.1-invalid. Lenient parsers (`openssl` CLI, `dnf`,
-`curl`) tolerate it; strict ones (browsers, `cryptography`-based tooling)
-reject it outright -- with no other visible difference in the cert. Example:
-
-```sh
-cd python   # or: cd bash
-python3 chainsmith.py issue-server --name web1 --ca int1 --cn web1.example.com \
-  --ou "R&D" --adcs-quirk OU
-openssl asn1parse -in ../store/web1/certs/web1.cert.pem | grep -A0 'R&D'
-# ... prim: PRINTABLESTRING :R&D   <- invalid on the wire, byte-identical
-#                                     content to a normal UTF8String encoding
-```
-
-OpenSSL's `string_mask` config (what the bash tool otherwise relies on for
-subject encoding) only ever auto-escalates to a wider *valid* string type
-when content doesn't fit the narrower one -- it has no way to deliberately
-emit an invalid encoding. So `bash/chainsmith.sh` implements `--adcs-quirk`
-by letting `openssl ca` issue the certificate completely normally, then
-re-tagging the subject and re-signing it with the parent CA's key via a
-small internal `python`+`cryptography` helper
-(`bash/lib/adcs_quirk.py`) -- the same technique the python tool uses
-directly. This is the one bash code path with a python dependency: it's
-only invoked when `--adcs-quirk` is actually passed, so `python3` and the
-`cryptography` package are only required if you use this specific flag.
-
 ## Cross-tool interoperability
 
 Try it: create a root+intermediate with one tool, then issue a server cert
@@ -242,15 +214,6 @@ This works because both tools write the same `meta.conf`, the same
 `bash/templates/ca.cnf.tmpl` even though it never shells out to `openssl`
 itself -- purely so the bash tool can later use `openssl ca`/`openssl req`
 against a CA the Python tool created).
-
-## Examples
-
-Nine full walkthroughs (real commands, real captured output) live under
-[`examples/`](examples/): multi-level CA chains, server cert variants
-(SAN/EC/RSA/subject fields/wildcards), reissue/rekey, cross-tool interop,
-the AD CS quirk simulation, signing externally-generated CSRs, and mTLS
-client-auth certs. See [`examples/README.md`](examples/README.md) for the
-full index.
 
 ## Roadmap
 

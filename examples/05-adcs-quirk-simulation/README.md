@@ -42,10 +42,23 @@ openssl x509 -in ../store/ex5-web-bash/certs/ex5-web-bash.cert.pem -noout -subje
 subject=OU=R&D, CN=adcs-bash.example.com
 ```
 
-And critically, the certificate still cryptographically verifies -- bash's
-implementation lets `openssl ca` issue normally, then re-tags and re-signs
-via an internal python helper (`bash/lib/adcs_quirk.py`), so the corruption
-never touches the signature:
+Why bash needs help for this: OpenSSL's `string_mask` config (what
+`bash/chainsmith.sh` otherwise relies on for subject encoding) only ever
+auto-*escalates* to a wider *valid* string type when content doesn't fit
+the narrower one -- it has no way to deliberately emit an invalid encoding,
+since that's precisely the bug being simulated, not something OpenSSL
+itself does. So bash's implementation instead lets `openssl ca` issue the
+certificate completely normally, then re-tags the subject and re-signs it
+with the parent CA's key via a small internal `python`+`cryptography`
+helper (`bash/lib/adcs_quirk.py`) -- the same `_type`/`_validate=False`
+technique the python tool uses directly (see below). This is the *only*
+bash code path with a python dependency: `python3` and the `cryptography`
+package are required only when `--adcs-quirk` is actually passed; every
+other bash command stays fully python-free.
+
+And critically, the certificate still cryptographically verifies -- the
+re-sign-after-retagging step is cryptographically correct, so the
+corruption never touches the signature:
 
 ```sh
 openssl verify -CAfile ../store/ex5-root/certs/ex5-root.cert.pem \
@@ -58,9 +71,12 @@ openssl verify -CAfile ../store/ex5-root/certs/ex5-root.cert.pem \
 
 ## python
 
-Same flag, same result -- python does the retagging natively via
-`cryptography`'s `_type`/`_validate=False` escape hatch instead of shelling
-out:
+Same flag, same result -- python does the retagging natively instead of
+shelling out. `cryptography`'s public API validates PrintableString content
+and refuses to build one containing `&`; `_type=_ASN1Type.PrintableString,
+_validate=False` on `x509.NameAttribute` is its own private escape hatch
+for constructing intentionally-nonconformant certificates (the same
+mechanism its own test suite uses), which is exactly what's needed here:
 
 ```sh
 cd python
