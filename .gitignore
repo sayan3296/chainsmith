@@ -2,6 +2,9 @@
 # this: it's runtime output, not source, and it contains private key material.
 /store/
 
+# Scratch keys/CSRs generated while authoring examples/ walkthroughs.
+examples/*/scratch/
+
 # Python
 __pycache__/
 *.pyc

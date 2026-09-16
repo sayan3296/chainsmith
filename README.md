@@ -47,7 +47,7 @@ Every generated file lives under `../store/<name>/`:
 
 ```
 store/<name>/
-  private/<name>.key.pem      # 0400
+  private/<name>.key.pem      # 0400; absent for sign-csr entities (see below)
   csr/<name>.csr.pem
   certs/<name>.cert.pem
   certs/<name>-chain.cert.pem # full chain, this cert first
@@ -59,11 +59,53 @@ store/<name>/
 
 ## Commands
 
-- `init-ca --name NAME [--parent PARENT] --cn CN [--keytype rsa|ec] [--keysize N | --curve NAME] [--days N] [--org O] [--ou OU] [--country C] [--state ST] [--locality L]`
-- `issue-server --name NAME --ca ISSUING_CA --cn CN [--san DNS:foo,IP:1.2.3.4] [--keytype rsa|ec] [--keysize N | --curve NAME] [--days N] [--org O] [--ou OU] [--country C] [--state ST] [--locality L]`
-- `reissue NAME [--rekey] [--days N] [--cn CN] [--san SAN] [--org O] [--ou OU] [--country C] [--state ST] [--locality L] [--keytype rsa|ec] [--keysize N] [--curve NAME]`
-- `list`
-- `show NAME`
+```
+init-ca --name NAME [--parent PARENT] --cn CN
+        [--keytype rsa|ec] [--keysize N | --curve NAME] [--days N]
+        [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
+```
+Creates a root CA (no `--parent`) or an intermediate CA (`--parent` an
+existing CA).
+
+```
+issue-server --name NAME --ca ISSUING_CA --cn CN
+             [--san DNS:foo,IP:1.2.3.4] [--keytype rsa|ec]
+             [--keysize N | --curve NAME] [--days N]
+             [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
+             [--adcs-quirk FIELD[,FIELD...]|all] [--eku client]
+```
+Issues a leaf server certificate signed by `ISSUING_CA`. `--adcs-quirk`
+— see "Simulating real-world CA bugs" below. `--eku` — see "Client
+certificate authentication (mTLS)" below.
+
+```
+sign-csr --name NAME --ca ISSUING_CA --csr PATH [--days N] [--eku client]
+```
+Signs a CSR generated outside chainsmith as a server certificate — see
+"Signing externally-generated CSRs" below.
+
+```
+reissue NAME [--rekey] [--days N] [--cn CN] [--san SAN]
+        [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
+        [--keytype rsa|ec] [--keysize N] [--curve NAME]
+        [--adcs-quirk FIELD[,FIELD...]|all] [--csr PATH] [--eku client]
+```
+Re-issues an existing CA or server cert; any flag not given falls back
+to what's stored in `meta.conf`. `--csr PATH` and `--eku` behave
+differently for `sign-csr`-created entities — see "Signing
+externally-generated CSRs" and "Client certificate authentication (mTLS)"
+below.
+
+```
+list
+```
+Every entity in the store, with type, parent, key source (`local` vs
+`external`), and expiry.
+
+```
+show NAME
+```
+Prints the decoded certificate (`openssl x509 -text`).
 
 `reissue` never re-prompts: any flag you don't pass falls back to what's
 already stored in that entity's `meta.conf`. Edit `meta.conf` by hand and
@@ -97,6 +139,92 @@ existing children -- the AKI extension is intentionally `keyid`-only (not
 `keyid,issuer`), so a bare reissue (new serial, same key, same subject)
 doesn't invalidate anything already issued.
 
+## Signing externally-generated CSRs
+
+`sign-csr --name NAME --ca ISSUING_CA --csr PATH` covers the shape
+`issue-server` doesn't: someone else generated the CSR -- their own key,
+their own subject -- and you just need an existing root or intermediate to
+sign it. Chainsmith never generates or holds a private key for the result;
+`csr/<name>.csr.pem` is a copy of exactly what was submitted, and
+`CN`/`O`/`OU`/`SAN`/etc. stay blank in `meta.conf` since the real values
+live in the certificate and the CSR itself, not duplicated:
+
+```sh
+openssl req -new -newkey rsa:2048 -nodes -keyout customer.key.pem \
+  -subj "/O=Customer Corp/CN=app.example.com" \
+  -addext "subjectAltName=DNS:app.example.com" -out customer.csr.pem
+./chainsmith.sh sign-csr --name web1 --ca int1 --csr customer.csr.pem
+```
+
+Both tools verify the CSR's self-signature before signing it -- bash gets
+this for free from `openssl ca`'s built-in check, python checks
+`csr.is_signature_valid` explicitly since `cryptography` doesn't do this on
+load -- so a tampered or malformed CSR is rejected, not silently accepted.
+
+`reissue` works differently for these entities: there's no
+chainsmith-managed key or subject to change, so `--rekey`/`--cn`/`--org`/
+etc. are rejected. A plain `reissue` re-signs the same stored CSR (new
+serial/validity, same subject); `--csr PATH` replaces it with a new one
+(e.g. the customer rotated their key). See
+[`examples/08-sign-external-csr`](examples/08-sign-external-csr/README.md).
+
+## Client certificate authentication (mTLS)
+
+Server certs default to `serverAuth` only. Pass `--eku client` to
+`issue-server`, `sign-csr`, or `reissue` to also include `clientAuth`, for
+certs that need to authenticate as both a TLS server and (e.g. in an mTLS
+setup) a client:
+
+```sh
+./chainsmith.sh issue-server --name web1 --ca int1 --cn app.example.com --eku client
+```
+
+Unlike `--adcs-quirk`, this is a durable property: it's stored in
+`meta.conf`, so a later plain `reissue` keeps the same EKU set. It also
+still applies to `sign-csr`-created entities' `reissue` (unlike the flags
+rejected for them above) since EKU is chainsmith-decided, not part of the
+submitted CSR. See
+[`examples/09-client-auth-eku`](examples/09-client-auth-eku/README.md).
+
+## Simulating real-world CA bugs
+
+Both tools' `issue-server`/`reissue` support
+`--adcs-quirk FIELD[,FIELD...]|all`, which force-encodes the named subject
+field(s) (`CN`, `O`, `OU`, `C`, `ST`, `L`) as ASN.1 PrintableString
+regardless of whether the value's characters actually fit that charset
+(PrintableString only allows `A-Z a-z 0-9 space ' ( ) + , - . / : = ?`).
+It's a one-off: it's not stored in `meta.conf`, so a later plain `reissue
+NAME` (no flag) produces a normal cert again. It only applies to server
+certs, not `init-ca`.
+
+This reproduces a real-world Windows AD CS issuance bug: such a CA can
+blindly re-encode a CSR's subject fields as PrintableString on issuance even
+when they contain disallowed characters (e.g. `&`), producing a certificate
+that's technically ASN.1-invalid. Lenient parsers (`openssl` CLI, `dnf`,
+`curl`) tolerate it; strict ones (browsers, `cryptography`-based tooling)
+reject it outright -- with no other visible difference in the cert. Example:
+
+```sh
+cd python   # or: cd bash
+python3 chainsmith.py issue-server --name web1 --ca int1 --cn web1.example.com \
+  --ou "R&D" --adcs-quirk OU
+openssl asn1parse -in ../store/web1/certs/web1.cert.pem | grep -A0 'R&D'
+# ... prim: PRINTABLESTRING :R&D   <- invalid on the wire, byte-identical
+#                                     content to a normal UTF8String encoding
+```
+
+OpenSSL's `string_mask` config (what the bash tool otherwise relies on for
+subject encoding) only ever auto-escalates to a wider *valid* string type
+when content doesn't fit the narrower one -- it has no way to deliberately
+emit an invalid encoding. So `bash/chainsmith.sh` implements `--adcs-quirk`
+by letting `openssl ca` issue the certificate completely normally, then
+re-tagging the subject and re-signing it with the parent CA's key via a
+small internal `python`+`cryptography` helper
+(`bash/lib/adcs_quirk.py`) -- the same technique the python tool uses
+directly. This is the one bash code path with a python dependency: it's
+only invoked when `--adcs-quirk` is actually passed, so `python3` and the
+`cryptography` package are only required if you use this specific flag.
+
 ## Cross-tool interoperability
 
 Try it: create a root+intermediate with one tool, then issue a server cert
@@ -114,6 +242,15 @@ This works because both tools write the same `meta.conf`, the same
 `bash/templates/ca.cnf.tmpl` even though it never shells out to `openssl`
 itself -- purely so the bash tool can later use `openssl ca`/`openssl req`
 against a CA the Python tool created).
+
+## Examples
+
+Nine full walkthroughs (real commands, real captured output) live under
+[`examples/`](examples/): multi-level CA chains, server cert variants
+(SAN/EC/RSA/subject fields/wildcards), reissue/rekey, cross-tool interop,
+the AD CS quirk simulation, signing externally-generated CSRs, and mTLS
+client-auth certs. See [`examples/README.md`](examples/README.md) for the
+full index.
 
 ## Roadmap
 

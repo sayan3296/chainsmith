@@ -17,6 +17,7 @@ import ipaddress
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.x509.name import _ASN1Type
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from . import store
@@ -115,6 +116,28 @@ def build_csr(name, meta, key):
     return csr
 
 
+def load_external_csr(path):
+    """Loads and validates a CSR generated outside chainsmith (sign-csr).
+    Returns (csr, raw_bytes) -- raw_bytes is written verbatim to
+    csr/<name>.csr.pem rather than re-serialized, to preserve exactly what
+    was submitted. Unlike bash's `openssl ca` (which verifies a CSR's
+    self-signature automatically before issuing), `cryptography` does not
+    check this on load, so it's done explicitly here to keep both tools'
+    behavior aligned.
+    """
+    try:
+        raw = open(path, "rb").read()
+    except OSError as e:
+        raise store.PkiError(f"failed to read CSR '{path}': {e}")
+    try:
+        csr = x509.load_pem_x509_csr(raw)
+    except ValueError as e:
+        raise store.PkiError(f"failed to parse CSR '{path}': {e}")
+    if not csr.is_signature_valid:
+        raise store.PkiError(f"CSR '{path}' signature does not verify")
+    return csr, raw
+
+
 def _write_cert(name, cert):
     path = store.entity_dir(name) / "certs" / f"{name}.cert.pem"
     path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -147,11 +170,21 @@ def self_sign_root(name, meta, key):
     return cert
 
 
-def sign_from_csr(name, csr, parent_name, days, extension_kind):
+def sign_from_csr(name, csr, parent_name, days, extension_kind, adcs_quirk_fields=None,
+                   extra_eku=None):
     """Signs `csr` with parent_name's key, writes certs/<name>.cert.pem, and
     records the issuance in the parent's index.txt/serial/newcerts (the same
     bookkeeping `openssl ca` performs, so bash and python stay interoperable).
     extension_kind is 'intermediate_ca' or 'server'.
+
+    adcs_quirk_fields, if given, is a set of subject field codes (from
+    _DN_OID_ORDER) to force-encode as PrintableString regardless of charset,
+    reproducing a real-world Windows AD CS issuance bug (see
+    _adcs_retag_subject).
+
+    extra_eku, if given (extension_kind == 'server' only), is a list of
+    additional ExtendedKeyUsageOID values to include alongside the
+    always-present SERVER_AUTH (e.g. CLIENT_AUTH for mTLS-style certs).
     """
     parent_key = load_private_key(parent_name)
     parent_cert = load_cert(parent_name)
@@ -160,9 +193,13 @@ def sign_from_csr(name, csr, parent_name, days, extension_kind):
     now = datetime.datetime.now(datetime.timezone.utc)
     not_after = now + datetime.timedelta(days=int(days))
 
+    subject = csr.subject
+    if adcs_quirk_fields:
+        subject = _adcs_retag_subject(subject, adcs_quirk_fields)
+
     builder = (
         x509.CertificateBuilder()
-        .subject_name(csr.subject)
+        .subject_name(subject)
         .issuer_name(parent_cert.subject)
         .public_key(csr.public_key())
         .serial_number(serial_int)
@@ -199,7 +236,8 @@ def sign_from_csr(name, csr, parent_name, days, extension_kind):
                           key_agreement=False, encipher_only=False, decipher_only=False),
             critical=True,
         ).add_extension(
-            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, *(extra_eku or [])]),
+            critical=False,
         )
     else:
         raise store.PkiError(f"unknown extension_kind '{extension_kind}'")
@@ -233,3 +271,31 @@ def name_to_dn(name):
         for attr in name.get_attributes_for_oid(oid):
             parts.append(f"/{label}={attr.value}")
     return "".join(parts)
+
+
+def _adcs_retag_subject(name, fields):
+    """Rebuilds `name` with the named RDN attributes (field codes from
+    _DN_OID_ORDER, e.g. {"OU"} or {"CN","O","OU","C","ST","L"}) force-tagged
+    as PrintableString regardless of charset.
+
+    This mimics a real-world Windows AD CS issuance bug: the CA blindly
+    re-encodes RDN values as PrintableString even when they contain
+    characters outside its charset (e.g. '&'), producing a certificate that
+    lenient parsers (OpenSSL CLI, dnf) accept but strict ones (browsers,
+    cryptography-library-based tooling) reject. `cryptography`'s public API
+    validates PrintableString content and won't let us build this normally;
+    _type/_validate=False are its own (private) escape hatch for
+    constructing intentionally-nonconformant certificates -- the same
+    mechanism its own test suite relies on.
+    """
+    label_by_oid = {oid: label for label, oid in _DN_OID_ORDER}
+    attrs = []
+    for rdn in name.rdns:
+        for attr in rdn:
+            if label_by_oid.get(attr.oid) in fields:
+                attrs.append(x509.NameAttribute(
+                    attr.oid, attr.value,
+                    _type=_ASN1Type.PrintableString, _validate=False))
+            else:
+                attrs.append(attr)
+    return x509.Name(attrs)

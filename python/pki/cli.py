@@ -5,9 +5,12 @@ import datetime
 import sys
 
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.x509.oid import ExtensionOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID
 
 from . import ca, store
+
+_ADCS_QUIRK_FIELDS = {"CN", "O", "OU", "C", "ST", "L"}
+_EKU_OIDS = {"client": ExtendedKeyUsageOID.CLIENT_AUTH}
 
 _EXTENSION_NAMES = {
     ExtensionOID.BASIC_CONSTRAINTS: "basicConstraints",
@@ -52,6 +55,43 @@ def _add_key_args(p):
     p.add_argument("--curve")
 
 
+def _parse_adcs_quirk(value):
+    """Parses --adcs-quirk's value ('all' or a comma-separated list of field
+    codes) into a set of field codes, or None if not given."""
+    if not value:
+        return None
+    if value.strip().lower() == "all":
+        return set(_ADCS_QUIRK_FIELDS)
+    fields = {f.strip().upper() for f in value.split(",") if f.strip()}
+    bad = fields - _ADCS_QUIRK_FIELDS
+    if bad:
+        die(f"unknown --adcs-quirk field(s) {sorted(bad)} "
+            f"(use one of {sorted(_ADCS_QUIRK_FIELDS)} or 'all')")
+    return fields
+
+
+def _validate_eku(value):
+    """Validates --eku's value (comma-separated additional EKU names to
+    include alongside the always-present serverAuth; currently only
+    'client' is supported). Returns the normalized string to store in
+    meta.conf ("" if not given)."""
+    if not value:
+        return ""
+    tokens = [t.strip().lower() for t in value.split(",") if t.strip()]
+    bad = [t for t in tokens if t not in _EKU_OIDS]
+    if bad:
+        die(f"unknown --eku value(s) {bad} (currently supported: {sorted(_EKU_OIDS)})")
+    return ",".join(tokens)
+
+
+def _eku_oids(value):
+    """Turns a validated, stored EKU string (see _validate_eku) into the
+    list of ExtendedKeyUsageOID values sign_from_csr expects."""
+    if not value:
+        return []
+    return [_EKU_OIDS[t] for t in value.split(",") if t]
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="chainsmith.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -73,7 +113,24 @@ def build_parser():
     p.add_argument("--days", type=int)
     _add_key_args(p)
     _add_subject_args(p)
+    p.add_argument("--adcs-quirk", metavar="FIELD[,FIELD...]|all",
+                    help="force the named subject field(s) (or 'all') to be "
+                         "encoded as PrintableString regardless of charset, "
+                         "reproducing a real-world Windows AD CS issuance bug")
+    p.add_argument("--eku", metavar="client",
+                    help="add clientAuth alongside the always-present "
+                         "serverAuth (mTLS-style certs); persisted to "
+                         "meta.conf, so it survives plain reissues")
     p.set_defaults(func=cmd_issue_server)
+
+    p = sub.add_parser("sign-csr", help="sign an externally-generated CSR as a server cert")
+    p.add_argument("--name", required=True)
+    p.add_argument("--ca", required=True, dest="ca_name")
+    p.add_argument("--csr", required=True, help="path to a PEM-encoded CSR file")
+    p.add_argument("--days", type=int)
+    p.add_argument("--eku", metavar="client",
+                    help="add clientAuth alongside the always-present serverAuth")
+    p.set_defaults(func=cmd_sign_csr)
 
     p = sub.add_parser("reissue", help="reissue an existing CA or server cert")
     p.add_argument("name")
@@ -83,6 +140,17 @@ def build_parser():
     p.add_argument("--san")
     _add_key_args(p)
     _add_subject_args(p)
+    p.add_argument("--adcs-quirk", metavar="FIELD[,FIELD...]|all",
+                    help="server certs only -- force the named subject "
+                         "field(s) (or 'all') to be encoded as PrintableString "
+                         "regardless of charset, reproducing a real-world "
+                         "Windows AD CS issuance bug")
+    p.add_argument("--csr", help="sign-csr entities only -- path to a new "
+                                  "PEM-encoded CSR to replace the stored one")
+    p.add_argument("--eku", metavar="client",
+                    help="server certs only -- add clientAuth alongside "
+                         "serverAuth; applies even to sign-csr entities "
+                         "since it's chainsmith-owned, not part of the CSR")
     p.set_defaults(func=cmd_reissue)
 
     p = sub.add_parser("list", help="list every entity in the store")
@@ -163,23 +231,67 @@ def cmd_issue_server(args):
         keysize, curve = "", args.curve or "prime256v1"
     days = str(args.days or 365)
 
+    eku = _validate_eku(args.eku)
+
     meta = {
         "NAME": name, "TYPE": "server", "PARENT": ca_name, "CN": cn,
         "ORG": args.org or "", "OU": args.ou or "", "COUNTRY": args.country or "",
         "STATE": args.state or "", "LOCALITY": args.locality or "",
         "KEYTYPE": keytype, "KEYSIZE": keysize, "CURVE": curve, "DAYS": days,
-        "SAN": san, "CREATED_AT": now_iso(), "REISSUE_COUNT": "0",
+        "SAN": san, "CREATED_AT": now_iso(), "REISSUE_COUNT": "0", "EKU": eku,
     }
+
+    adcs_quirk_fields = _parse_adcs_quirk(args.adcs_quirk)
 
     store.mkdir_entity_skeleton(name)
     key = ca.generate_key(meta)
     ca.write_private_key(name, key)
     csr = ca.build_csr(name, meta, key)
-    ca.sign_from_csr(name, csr, ca_name, days, "server")
+    ca.sign_from_csr(name, csr, ca_name, days, "server",
+                      adcs_quirk_fields=adcs_quirk_fields, extra_eku=_eku_oids(eku))
 
     store.meta_write(name, meta)
     store.build_chain(name)
     print(f"issued server certificate '{name}' (signed by '{ca_name}') -> "
+          f"{store.entity_dir(name)}/certs/{name}.cert.pem")
+    if adcs_quirk_fields:
+        print(f"WARNING: --adcs-quirk applied to {sorted(adcs_quirk_fields)} -- "
+              "the issued certificate is intentionally ASN.1-nonconformant "
+              "(PrintableString content violating its charset) to reproduce a "
+              "real-world CA issuance bug; expect strict parsers/browsers to "
+              "reject it.", file=sys.stderr)
+
+
+def cmd_sign_csr(args):
+    name = args.name
+    if store.entity_dir(name).exists():
+        die(f"'{name}' already exists in the store; use reissue instead")
+    ca_name = args.ca_name
+    if not (store.entity_dir(ca_name) / "meta.conf").is_file():
+        die(f"issuing CA '{ca_name}' not found")
+
+    days = str(args.days or 365)
+    try:
+        csr, raw = ca.load_external_csr(args.csr)
+    except store.PkiError as e:
+        die(str(e))
+    eku = _validate_eku(args.eku)
+
+    meta = {
+        "NAME": name, "TYPE": "server", "PARENT": ca_name, "CN": "",
+        "ORG": "", "OU": "", "COUNTRY": "", "STATE": "", "LOCALITY": "",
+        "KEYTYPE": "", "KEYSIZE": "", "CURVE": "", "DAYS": days, "SAN": "",
+        "CREATED_AT": now_iso(), "REISSUE_COUNT": "0", "EXTERNAL_CSR": "1",
+        "EKU": eku,
+    }
+
+    store.mkdir_entity_skeleton(name)
+    (store.entity_dir(name) / "csr" / f"{name}.csr.pem").write_bytes(raw)
+    ca.sign_from_csr(name, csr, ca_name, days, "server", extra_eku=_eku_oids(eku))
+
+    store.meta_write(name, meta)
+    store.build_chain(name)
+    print(f"signed external CSR -> entity '{name}' (signed by '{ca_name}') -> "
           f"{store.entity_dir(name)}/certs/{name}.cert.pem")
 
 
@@ -187,6 +299,31 @@ def cmd_reissue(args):
     name = args.name
     meta = store.meta_load(name)
     entity_type, parent = meta["TYPE"], meta["PARENT"]
+    is_external = bool(meta.get("EXTERNAL_CSR"))
+    if args.adcs_quirk and entity_type != "server":
+        die(f"--adcs-quirk only applies to server certificates "
+            f"(entity '{name}' is type '{entity_type}')")
+    adcs_quirk_fields = _parse_adcs_quirk(args.adcs_quirk)
+    if args.eku and entity_type != "server":
+        die(f"--eku only applies to server certificates "
+            f"(entity '{name}' is type '{entity_type}')")
+
+    if is_external:
+        bad = [flag for flag, val in (
+            ("--rekey", args.rekey), ("--cn", args.cn), ("--san", args.san),
+            ("--org", args.org), ("--ou", args.ou), ("--country", args.country),
+            ("--state", args.state), ("--locality", args.locality),
+            ("--keytype", args.keytype), ("--keysize", args.keysize),
+            ("--curve", args.curve),
+        ) if val]
+        if bad:
+            die(f"{', '.join(bad)} don't apply to '{name}': it was created via sign-csr "
+                f"(subject/SAN/key come from the CSR, not chainsmith) -- use --csr PATH "
+                f"to replace it instead")
+    elif args.csr:
+        die(f"--csr only applies to entities created via sign-csr "
+            f"('{name}' has a chainsmith-managed key)")
+
     orig_subject = {k: meta[k] for k in ("CN", "ORG", "OU", "COUNTRY", "STATE", "LOCALITY")}
 
     if args.cn:
@@ -205,6 +342,8 @@ def cmd_reissue(args):
         meta["LOCALITY"] = args.locality
     if args.days:
         meta["DAYS"] = str(args.days)
+    if args.eku:
+        meta["EKU"] = _validate_eku(args.eku)
     if args.keytype:
         meta["KEYTYPE"] = args.keytype
         if args.keytype == "rsa":
@@ -229,39 +368,64 @@ def cmd_reissue(args):
     store.archive_entity(name)
     meta["REISSUE_COUNT"] = str(int(meta["REISSUE_COUNT"] or 0) + 1)
 
-    if args.rekey:
-        key = ca.generate_key(meta)
-        ca.write_private_key(name, key)
+    if is_external:
+        csr_path = store.entity_dir(name) / "csr" / f"{name}.csr.pem"
+        if args.csr:
+            try:
+                csr, raw = ca.load_external_csr(args.csr)
+            except store.PkiError as e:
+                die(str(e))
+            csr_path.write_bytes(raw)
+        else:
+            try:
+                csr, _ = ca.load_external_csr(str(csr_path))
+            except store.PkiError as e:
+                die(str(e))
+        ca.sign_from_csr(name, csr, parent, meta["DAYS"], "server",
+                          adcs_quirk_fields=adcs_quirk_fields,
+                          extra_eku=_eku_oids(meta["EKU"]))
     else:
-        key = ca.load_private_key(name)
-
-    if entity_type == "root":
-        ca.self_sign_root(name, meta, key)
-        store.render_ca_config(name, meta["DAYS"])
         if args.rekey:
-            print(f"WARNING: root '{name}' was rekeyed. Any intermediates previously "
-                  "signed by the old root key no longer chain to it; reissue them too.",
-                  file=sys.stderr)
-    elif entity_type == "intermediate":
-        csr = ca.build_csr(name, meta, key)
-        ca.sign_from_csr(name, csr, parent, meta["DAYS"], "intermediate_ca")
-        store.render_ca_config(name, meta["DAYS"])
-    elif entity_type == "server":
-        csr = ca.build_csr(name, meta, key)
-        ca.sign_from_csr(name, csr, parent, meta["DAYS"], "server")
-    else:
-        die(f"unknown entity type '{entity_type}' for '{name}'")
+            key = ca.generate_key(meta)
+            ca.write_private_key(name, key)
+        else:
+            key = ca.load_private_key(name)
+
+        if entity_type == "root":
+            ca.self_sign_root(name, meta, key)
+            store.render_ca_config(name, meta["DAYS"])
+            if args.rekey:
+                print(f"WARNING: root '{name}' was rekeyed. Any intermediates previously "
+                      "signed by the old root key no longer chain to it; reissue them too.",
+                      file=sys.stderr)
+        elif entity_type == "intermediate":
+            csr = ca.build_csr(name, meta, key)
+            ca.sign_from_csr(name, csr, parent, meta["DAYS"], "intermediate_ca")
+            store.render_ca_config(name, meta["DAYS"])
+        elif entity_type == "server":
+            csr = ca.build_csr(name, meta, key)
+            ca.sign_from_csr(name, csr, parent, meta["DAYS"], "server",
+                              adcs_quirk_fields=adcs_quirk_fields,
+                              extra_eku=_eku_oids(meta["EKU"]))
+        else:
+            die(f"unknown entity type '{entity_type}' for '{name}'")
 
     store.meta_write(name, meta)
     store.build_chain(name)
     print(f"reissued '{name}' (type={entity_type}, rekey={int(args.rekey)}) -> "
           f"{store.entity_dir(name)}/certs/{name}.cert.pem")
+    if adcs_quirk_fields:
+        print(f"WARNING: --adcs-quirk applied to {sorted(adcs_quirk_fields)} -- "
+              "the reissued certificate is intentionally ASN.1-nonconformant "
+              "(PrintableString content violating its charset) to reproduce a "
+              "real-world CA issuance bug; expect strict parsers/browsers to "
+              "reject it.", file=sys.stderr)
 
 
 def cmd_list(args):
     if not store.STORE_DIR.is_dir():
         die(f"store not found at {store.STORE_DIR}")
-    print(f"{'NAME':<20} {'TYPE':<12} {'PARENT':<20} {'DAYS':<10} EXPIRES")
+    print(f"{'NAME':<20} {'TYPE':<12} {'PARENT':<20} {'DAYS':<10} {'KEY':<9} EXPIRES")
     for d in sorted(store.STORE_DIR.iterdir()):
         if not (d / "meta.conf").is_file():
             continue
@@ -271,8 +435,9 @@ def cmd_list(args):
         cert_path = d / "certs" / f"{name}.cert.pem"
         if cert_path.is_file():
             expiry = ca.load_cert(name).not_valid_after.strftime("%b %d %H:%M:%S %Y GMT")
+        key_source = "external" if meta.get("EXTERNAL_CSR") else "local"
         print(f"{name:<20} {meta['TYPE']:<12} {meta['PARENT'] or '-':<20} "
-              f"{meta['DAYS']:<10} {expiry}")
+              f"{meta['DAYS']:<10} {key_source:<9} {expiry}")
 
 
 def cmd_show(args):
