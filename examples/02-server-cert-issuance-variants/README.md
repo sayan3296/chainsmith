@@ -50,7 +50,8 @@ Private-Key: (256 bit)
 `--keytype ec` defaults to curve `prime256v1` (P-256) for server certs, or
 pass `--curve NAME` for a different one. (CAs created with `--keytype ec`
 default to `secp384r1`/P-384 instead -- see `README.md`'s Defaults
-section.) The default without `--keytype` is RSA 2048 for server certs.
+section.) The default without `--keytype` is RSA 4096 for server certs
+(same as CAs).
 
 ## 3. Full subject fields
 

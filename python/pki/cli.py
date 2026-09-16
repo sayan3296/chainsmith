@@ -226,7 +226,7 @@ def cmd_issue_server(args):
 
     keytype = args.keytype or "rsa"
     if keytype == "rsa":
-        keysize, curve = str(args.keysize or 2048), ""
+        keysize, curve = str(args.keysize or 4096), ""
     else:
         keysize, curve = "", args.curve or "prime256v1"
     days = str(args.days or 365)
@@ -347,7 +347,7 @@ def cmd_reissue(args):
     if args.keytype:
         meta["KEYTYPE"] = args.keytype
         if args.keytype == "rsa":
-            meta["KEYSIZE"] = str(args.keysize or meta["KEYSIZE"] or 2048)
+            meta["KEYSIZE"] = str(args.keysize or meta["KEYSIZE"] or 4096)
             meta["CURVE"] = ""
         else:
             meta["KEYSIZE"] = ""

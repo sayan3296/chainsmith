@@ -114,7 +114,7 @@ terminal); in non-interactive/scripted use, pass every value explicitly.
 
 - Validity: root 7300 days (20y), intermediate 3650 days (10y), server 365
   days (1y).
-- Keys: RSA 4096 (CA) / RSA 2048 (server) by default; pass `--keytype ec` for
+- Keys: RSA 4096 (CA and server) by default; pass `--keytype ec` for
   EC P-384 (CA) / P-256 (server).
 
 ## ⚠️ Two things that will break a chain -- by design, not by bug
