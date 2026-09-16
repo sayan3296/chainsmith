@@ -23,15 +23,22 @@ Commands:
           [--san DNS:foo,DNS:bar,IP:1.2.3.4] [--keytype rsa|ec]
           [--keysize N] [--curve NAME] [--days N]
           [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
-      Issues a leaf server certificate signed by ISSUING_CA.
+          [--adcs-quirk FIELD[,FIELD...]|all]
+      Issues a leaf server certificate signed by ISSUING_CA. --adcs-quirk
+      force-encodes the named subject field(s) (CN/O/OU/C/ST/L, or "all")
+      as PrintableString regardless of charset, reproducing a real-world
+      Windows AD CS issuance bug; requires python3+cryptography and is
+      one-off (not stored in meta.conf).
 
   reissue NAME [--rekey] [--days N] [--cn CN] [--san SAN] [--org O]
           [--ou OU] [--country C] [--state ST] [--locality L]
           [--keytype rsa|ec] [--keysize N] [--curve NAME]
+          [--adcs-quirk FIELD[,FIELD...]|all]
       Re-issues an existing CA or server cert. Any flag not given falls
       back to the value already stored in that entity's meta.conf.
       Without --rekey the existing private key is reused; with --rekey a
-      fresh keypair is generated first.
+      fresh keypair is generated first. --adcs-quirk (see issue-server)
+      only applies to server certs.
 
   list
       Shows every entity in the store with its type, parent, and expiry.
@@ -122,7 +129,7 @@ cmd_init_ca() {
 
 cmd_issue_server() {
   local name="" ca="" cn="" san="" keytype="" keysize="" curve="" days=""
-  local org="" ou="" country="" state="" locality=""
+  local org="" ou="" country="" state="" locality="" adcs_quirk=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
@@ -138,10 +145,15 @@ cmd_issue_server() {
       --country) country="$2"; shift 2 ;;
       --state) state="$2"; shift 2 ;;
       --locality) locality="$2"; shift 2 ;;
+      --adcs-quirk) adcs_quirk="$2"; shift 2 ;;
       *) die "unknown option '$1' for issue-server" ;;
     esac
   done
   [[ -n "$name" ]] || die "issue-server requires --name"
+  if [[ -n "$adcs_quirk" ]]; then
+    validate_adcs_quirk_fields "$adcs_quirk"
+    require_python_cryptography
+  fi
   [[ -e "$(entity_dir "$name")" ]] && die "'$name' already exists in the store; use reissue instead"
   [[ -n "$ca" ]] || die "issue-server requires --ca ISSUING_CA"
   [[ -f "$(entity_dir "$ca")/openssl.cnf" ]] || die "issuing CA '$ca' not found"
@@ -178,6 +190,7 @@ cmd_issue_server() {
     -subj "$(build_subject)" -out "$csrfile"
   openssl ca -config "$parentcnf" -extensions v3_server \
     -days "$DAYS" -notext -batch -in "$csrfile" -out "$certfile"
+  [[ -n "$adcs_quirk" ]] && apply_adcs_quirk "$name" "$adcs_quirk"
 
   meta_write "$name"
   build_chain "$name"
@@ -194,7 +207,7 @@ cmd_reissue() {
   local rekey=0
 
   local days="" cn="" san="" org="" ou="" country="" state="" locality=""
-  local keytype="" keysize="" curve=""
+  local keytype="" keysize="" curve="" adcs_quirk=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --rekey) rekey=1; shift ;;
@@ -209,9 +222,16 @@ cmd_reissue() {
       --keytype) keytype="$2"; shift 2 ;;
       --keysize) keysize="$2"; shift 2 ;;
       --curve) curve="$2"; shift 2 ;;
+      --adcs-quirk) adcs_quirk="$2"; shift 2 ;;
       *) die "unknown option '$1' for reissue" ;;
     esac
   done
+
+  if [[ -n "$adcs_quirk" ]]; then
+    [[ "$orig_type" == "server" ]] || die "--adcs-quirk only applies to server certificates ('$name' is type '$orig_type')"
+    validate_adcs_quirk_fields "$adcs_quirk"
+    require_python_cryptography
+  fi
 
   # meta_load already populated TYPE/PARENT/CN/... ; overlay any given flags.
   TYPE="$orig_type"; PARENT="$orig_parent"
@@ -283,6 +303,7 @@ cmd_reissue() {
       openssl ca -config "$(entity_dir "$PARENT")/openssl.cnf" \
         -extensions v3_server -days "$DAYS" -notext -batch \
         -in "$csrfile" -out "$certfile"
+      [[ -n "$adcs_quirk" ]] && apply_adcs_quirk "$name" "$adcs_quirk"
       ;;
     *) die "unknown entity type '$TYPE' for '$name'" ;;
   esac

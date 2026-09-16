@@ -9,6 +9,8 @@ from cryptography.x509.oid import ExtensionOID
 
 from . import ca, store
 
+_ADCS_QUIRK_FIELDS = {"CN", "O", "OU", "C", "ST", "L"}
+
 _EXTENSION_NAMES = {
     ExtensionOID.BASIC_CONSTRAINTS: "basicConstraints",
     ExtensionOID.KEY_USAGE: "keyUsage",
@@ -52,6 +54,21 @@ def _add_key_args(p):
     p.add_argument("--curve")
 
 
+def _parse_adcs_quirk(value):
+    """Parses --adcs-quirk's value ('all' or a comma-separated list of field
+    codes) into a set of field codes, or None if not given."""
+    if not value:
+        return None
+    if value.strip().lower() == "all":
+        return set(_ADCS_QUIRK_FIELDS)
+    fields = {f.strip().upper() for f in value.split(",") if f.strip()}
+    bad = fields - _ADCS_QUIRK_FIELDS
+    if bad:
+        die(f"unknown --adcs-quirk field(s) {sorted(bad)} "
+            f"(use one of {sorted(_ADCS_QUIRK_FIELDS)} or 'all')")
+    return fields
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="chainsmith.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -73,6 +90,10 @@ def build_parser():
     p.add_argument("--days", type=int)
     _add_key_args(p)
     _add_subject_args(p)
+    p.add_argument("--adcs-quirk", metavar="FIELD[,FIELD...]|all",
+                    help="force the named subject field(s) (or 'all') to be "
+                         "encoded as PrintableString regardless of charset, "
+                         "reproducing a real-world Windows AD CS issuance bug")
     p.set_defaults(func=cmd_issue_server)
 
     p = sub.add_parser("reissue", help="reissue an existing CA or server cert")
@@ -83,6 +104,11 @@ def build_parser():
     p.add_argument("--san")
     _add_key_args(p)
     _add_subject_args(p)
+    p.add_argument("--adcs-quirk", metavar="FIELD[,FIELD...]|all",
+                    help="server certs only -- force the named subject "
+                         "field(s) (or 'all') to be encoded as PrintableString "
+                         "regardless of charset, reproducing a real-world "
+                         "Windows AD CS issuance bug")
     p.set_defaults(func=cmd_reissue)
 
     p = sub.add_parser("list", help="list every entity in the store")
@@ -171,22 +197,35 @@ def cmd_issue_server(args):
         "SAN": san, "CREATED_AT": now_iso(), "REISSUE_COUNT": "0",
     }
 
+    adcs_quirk_fields = _parse_adcs_quirk(args.adcs_quirk)
+
     store.mkdir_entity_skeleton(name)
     key = ca.generate_key(meta)
     ca.write_private_key(name, key)
     csr = ca.build_csr(name, meta, key)
-    ca.sign_from_csr(name, csr, ca_name, days, "server")
+    ca.sign_from_csr(name, csr, ca_name, days, "server",
+                      adcs_quirk_fields=adcs_quirk_fields)
 
     store.meta_write(name, meta)
     store.build_chain(name)
     print(f"issued server certificate '{name}' (signed by '{ca_name}') -> "
           f"{store.entity_dir(name)}/certs/{name}.cert.pem")
+    if adcs_quirk_fields:
+        print(f"WARNING: --adcs-quirk applied to {sorted(adcs_quirk_fields)} -- "
+              "the issued certificate is intentionally ASN.1-nonconformant "
+              "(PrintableString content violating its charset) to reproduce a "
+              "real-world CA issuance bug; expect strict parsers/browsers to "
+              "reject it.", file=sys.stderr)
 
 
 def cmd_reissue(args):
     name = args.name
     meta = store.meta_load(name)
     entity_type, parent = meta["TYPE"], meta["PARENT"]
+    if args.adcs_quirk and entity_type != "server":
+        die(f"--adcs-quirk only applies to server certificates "
+            f"(entity '{name}' is type '{entity_type}')")
+    adcs_quirk_fields = _parse_adcs_quirk(args.adcs_quirk)
     orig_subject = {k: meta[k] for k in ("CN", "ORG", "OU", "COUNTRY", "STATE", "LOCALITY")}
 
     if args.cn:
@@ -248,7 +287,8 @@ def cmd_reissue(args):
         store.render_ca_config(name, meta["DAYS"])
     elif entity_type == "server":
         csr = ca.build_csr(name, meta, key)
-        ca.sign_from_csr(name, csr, parent, meta["DAYS"], "server")
+        ca.sign_from_csr(name, csr, parent, meta["DAYS"], "server",
+                          adcs_quirk_fields=adcs_quirk_fields)
     else:
         die(f"unknown entity type '{entity_type}' for '{name}'")
 
@@ -256,6 +296,12 @@ def cmd_reissue(args):
     store.build_chain(name)
     print(f"reissued '{name}' (type={entity_type}, rekey={int(args.rekey)}) -> "
           f"{store.entity_dir(name)}/certs/{name}.cert.pem")
+    if adcs_quirk_fields:
+        print(f"WARNING: --adcs-quirk applied to {sorted(adcs_quirk_fields)} -- "
+              "the reissued certificate is intentionally ASN.1-nonconformant "
+              "(PrintableString content violating its charset) to reproduce a "
+              "real-world CA issuance bug; expect strict parsers/browsers to "
+              "reject it.", file=sys.stderr)
 
 
 def cmd_list(args):

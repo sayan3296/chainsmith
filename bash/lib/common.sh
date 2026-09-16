@@ -15,6 +15,57 @@ require_openssl() {
   command -v openssl >/dev/null 2>&1 || die "openssl not found in PATH"
 }
 
+# validate_adcs_quirk_fields RAW - dies if RAW (a comma-separated field list
+# or "all") contains anything other than CN/O/OU/C/ST/L. Called before any
+# CA work happens so a typo fails fast instead of wasting a serial number.
+validate_adcs_quirk_fields() {
+  local raw="$1" tok
+  [[ -z "$raw" ]] && return 0
+  [[ "${raw,,}" == "all" ]] && return 0
+  IFS=',' read -ra parts <<< "$raw"
+  for tok in "${parts[@]}"; do
+    tok="$(echo "$tok" | xargs)"
+    [[ -z "$tok" ]] && continue
+    case "${tok^^}" in
+      CN|O|OU|C|ST|L) ;;
+      *) die "unknown --adcs-quirk field '$tok' (use CN, O, OU, C, ST, L, or 'all')" ;;
+    esac
+  done
+}
+
+# require_python_cryptography - lazy check, only called when --adcs-quirk is
+# actually used. Every other command path in this tool stays python-free.
+require_python_cryptography() {
+  command -v python3 >/dev/null 2>&1 || die "--adcs-quirk requires python3 (only for this flag; no other command needs it)"
+  python3 -c "import cryptography" >/dev/null 2>&1 || die "--adcs-quirk requires the python 'cryptography' package (pip install cryptography)"
+}
+
+# apply_adcs_quirk NAME FIELDS - post-processes the just-issued
+# certs/<NAME>.cert.pem via lib/adcs_quirk.py: force-tags FIELDS as
+# PrintableString regardless of charset (reproducing a real-world Windows
+# AD CS issuance bug) and re-signs with the parent CA's key. Relies on the
+# caller's PARENT global (set by cmd_issue_server/cmd_reissue) to locate the
+# signing key. Also patches the CA's newcerts/<serial>.pem bookkeeping copy
+# when present, so both on-disk copies stay byte-identical.
+apply_adcs_quirk() {
+  local name="$1" fields="$2" dir certfile parentkey serial newcerts_file
+  dir="$(entity_dir "$name")"
+  certfile="$dir/certs/$name.cert.pem"
+  parentkey="$(entity_dir "$PARENT")/private/$PARENT.key.pem"
+  local outs=("$certfile")
+  if [[ -f "$(entity_dir "$PARENT")/serial.old" ]]; then
+    serial="$(cat "$(entity_dir "$PARENT")/serial.old")"
+    newcerts_file="$(entity_dir "$PARENT")/newcerts/$serial.pem"
+    [[ -f "$newcerts_file" ]] && outs+=("$newcerts_file")
+  fi
+  python3 "$BASH_DIR/lib/adcs_quirk.py" "$certfile" "$parentkey" "$fields" "${outs[@]}" \
+    || die "--adcs-quirk post-processing failed for '$name'"
+  log "WARNING: --adcs-quirk applied to [$fields] -- '$name' is intentionally" \
+      "ASN.1-nonconformant (PrintableString content violating its charset) to" \
+      "reproduce a real-world CA issuance bug; expect strict parsers/browsers" \
+      "to reject it."
+}
+
 # prompt_if_missing VARNAME "Prompt text" "default value"
 # Reads from stdin into VARNAME if it is currently empty. When stdin isn't a
 # terminal (scripted/automated invocation), silently falls back to the

@@ -60,10 +60,12 @@ store/<name>/
 ## Commands
 
 - `init-ca --name NAME [--parent PARENT] --cn CN [--keytype rsa|ec] [--keysize N | --curve NAME] [--days N] [--org O] [--ou OU] [--country C] [--state ST] [--locality L]`
-- `issue-server --name NAME --ca ISSUING_CA --cn CN [--san DNS:foo,IP:1.2.3.4] [--keytype rsa|ec] [--keysize N | --curve NAME] [--days N] [--org O] [--ou OU] [--country C] [--state ST] [--locality L]`
-- `reissue NAME [--rekey] [--days N] [--cn CN] [--san SAN] [--org O] [--ou OU] [--country C] [--state ST] [--locality L] [--keytype rsa|ec] [--keysize N] [--curve NAME]`
+- `issue-server --name NAME --ca ISSUING_CA --cn CN [--san DNS:foo,IP:1.2.3.4] [--keytype rsa|ec] [--keysize N | --curve NAME] [--days N] [--org O] [--ou OU] [--country C] [--state ST] [--locality L] [--adcs-quirk FIELD[,FIELD...]|all]`
+- `reissue NAME [--rekey] [--days N] [--cn CN] [--san SAN] [--org O] [--ou OU] [--country C] [--state ST] [--locality L] [--keytype rsa|ec] [--keysize N] [--curve NAME] [--adcs-quirk FIELD[,FIELD...]|all]`
 - `list`
 - `show NAME`
+
+(`--adcs-quirk` is a corruption-simulation flag for server certs only — see "Simulating real-world CA bugs" below.)
 
 `reissue` never re-prompts: any flag you don't pass falls back to what's
 already stored in that entity's `meta.conf`. Edit `meta.conf` by hand and
@@ -96,6 +98,45 @@ Both tools print a warning when they detect this. Note that reissuing a CA
 existing children -- the AKI extension is intentionally `keyid`-only (not
 `keyid,issuer`), so a bare reissue (new serial, same key, same subject)
 doesn't invalidate anything already issued.
+
+## Simulating real-world CA bugs
+
+Both tools' `issue-server`/`reissue` support
+`--adcs-quirk FIELD[,FIELD...]|all`, which force-encodes the named subject
+field(s) (`CN`, `O`, `OU`, `C`, `ST`, `L`) as ASN.1 PrintableString
+regardless of whether the value's characters actually fit that charset
+(PrintableString only allows `A-Z a-z 0-9 space ' ( ) + , - . / : = ?`).
+It's a one-off: it's not stored in `meta.conf`, so a later plain `reissue
+NAME` (no flag) produces a normal cert again. It only applies to server
+certs, not `init-ca`.
+
+This reproduces a real-world Windows AD CS issuance bug: such a CA can
+blindly re-encode a CSR's subject fields as PrintableString on issuance even
+when they contain disallowed characters (e.g. `&`), producing a certificate
+that's technically ASN.1-invalid. Lenient parsers (`openssl` CLI, `dnf`,
+`curl`) tolerate it; strict ones (browsers, `cryptography`-based tooling)
+reject it outright -- with no other visible difference in the cert. Example:
+
+```sh
+cd python   # or: cd bash
+python3 chainsmith.py issue-server --name web1 --ca int1 --cn web1.example.com \
+  --ou "R&D" --adcs-quirk OU
+openssl asn1parse -in ../store/web1/certs/web1.cert.pem | grep -A0 'R&D'
+# ... prim: PRINTABLESTRING :R&D   <- invalid on the wire, byte-identical
+#                                     content to a normal UTF8String encoding
+```
+
+OpenSSL's `string_mask` config (what the bash tool otherwise relies on for
+subject encoding) only ever auto-escalates to a wider *valid* string type
+when content doesn't fit the narrower one -- it has no way to deliberately
+emit an invalid encoding. So `bash/chainsmith.sh` implements `--adcs-quirk`
+by letting `openssl ca` issue the certificate completely normally, then
+re-tagging the subject and re-signing it with the parent CA's key via a
+small internal `python`+`cryptography` helper
+(`bash/lib/adcs_quirk.py`) -- the same technique the python tool uses
+directly. This is the one bash code path with a python dependency: it's
+only invoked when `--adcs-quirk` is actually passed, so `python3` and the
+`cryptography` package are only required if you use this specific flag.
 
 ## Cross-tool interoperability
 
