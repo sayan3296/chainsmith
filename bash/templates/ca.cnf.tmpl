@@ -65,3 +65,13 @@ authorityKeyIdentifier = keyid
 basicConstraints       = CA:false
 keyUsage                = critical, digitalSignature, keyEncipherment
 extendedKeyUsage        = serverAuth
+
+# Selected instead of v3_server via -extensions when --eku client is given
+# (lib/common.sh:resolve_eku_extension) -- adds clientAuth for mTLS-style
+# certs that authenticate as both server and client.
+[ v3_server_with_client_auth ]
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid
+basicConstraints       = CA:false
+keyUsage                = critical, digitalSignature, keyEncipherment
+extendedKeyUsage        = serverAuth, clientAuth

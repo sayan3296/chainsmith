@@ -22,6 +22,9 @@ intermediate) and ends with a cleanup step -- these run against the real
 - [`08-sign-external-csr`](08-sign-external-csr/README.md) --
   signing a CSR generated outside chainsmith (a customer's own key/subject)
   against a root or intermediate, and how `reissue` differs for it.
+- [`09-client-auth-eku`](09-client-auth-eku/README.md) --
+  adding clientAuth alongside serverAuth for mTLS-style certs, and how it
+  persists across reissue (including sign-csr entities).
 
 See the top-level [`README.md`](../README.md) for command reference and
 defaults.

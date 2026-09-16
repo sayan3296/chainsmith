@@ -47,7 +47,7 @@ Every generated file lives under `../store/<name>/`:
 
 ```
 store/<name>/
-  private/<name>.key.pem      # 0400
+  private/<name>.key.pem      # 0400; absent for sign-csr entities (see below)
   csr/<name>.csr.pem
   certs/<name>.cert.pem
   certs/<name>-chain.cert.pem # full chain, this cert first
@@ -72,29 +72,29 @@ issue-server --name NAME --ca ISSUING_CA --cn CN
              [--san DNS:foo,IP:1.2.3.4] [--keytype rsa|ec]
              [--keysize N | --curve NAME] [--days N]
              [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
-             [--adcs-quirk FIELD[,FIELD...]|all]
+             [--adcs-quirk FIELD[,FIELD...]|all] [--eku client]
 ```
 Issues a leaf server certificate signed by `ISSUING_CA`. `--adcs-quirk`
-is a corruption-simulation flag (server certs only) — see "Simulating
-real-world CA bugs" below.
+— see "Simulating real-world CA bugs" below. `--eku` — see "Client
+certificate authentication (mTLS)" below.
 
 ```
-sign-csr --name NAME --ca ISSUING_CA --csr PATH [--days N]
+sign-csr --name NAME --ca ISSUING_CA --csr PATH [--days N] [--eku client]
 ```
-Signs a CSR generated outside chainsmith (e.g. a customer's own
-key/subject) as a server certificate, issued by `ISSUING_CA` (root or
-intermediate). Chainsmith never holds a private key for the result.
+Signs a CSR generated outside chainsmith as a server certificate — see
+"Signing externally-generated CSRs" below.
 
 ```
 reissue NAME [--rekey] [--days N] [--cn CN] [--san SAN]
         [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
         [--keytype rsa|ec] [--keysize N] [--curve NAME]
-        [--adcs-quirk FIELD[,FIELD...]|all] [--csr PATH]
+        [--adcs-quirk FIELD[,FIELD...]|all] [--csr PATH] [--eku client]
 ```
 Re-issues an existing CA or server cert; any flag not given falls back
-to what's stored in `meta.conf`. `--csr PATH` only applies to
-`sign-csr`-created entities, replacing `--rekey`/subject/key flags
-(which don't apply there — see `examples/08-sign-external-csr`).
+to what's stored in `meta.conf`. `--csr PATH` and `--eku` behave
+differently for `sign-csr`-created entities — see "Signing
+externally-generated CSRs" and "Client certificate authentication (mTLS)"
+below.
 
 ```
 list
@@ -138,6 +138,53 @@ Both tools print a warning when they detect this. Note that reissuing a CA
 existing children -- the AKI extension is intentionally `keyid`-only (not
 `keyid,issuer`), so a bare reissue (new serial, same key, same subject)
 doesn't invalidate anything already issued.
+
+## Signing externally-generated CSRs
+
+`sign-csr --name NAME --ca ISSUING_CA --csr PATH` covers the shape
+`issue-server` doesn't: someone else generated the CSR -- their own key,
+their own subject -- and you just need an existing root or intermediate to
+sign it. Chainsmith never generates or holds a private key for the result;
+`csr/<name>.csr.pem` is a copy of exactly what was submitted, and
+`CN`/`O`/`OU`/`SAN`/etc. stay blank in `meta.conf` since the real values
+live in the certificate and the CSR itself, not duplicated:
+
+```sh
+openssl req -new -newkey rsa:2048 -nodes -keyout customer.key.pem \
+  -subj "/O=Customer Corp/CN=app.example.com" \
+  -addext "subjectAltName=DNS:app.example.com" -out customer.csr.pem
+./chainsmith.sh sign-csr --name web1 --ca int1 --csr customer.csr.pem
+```
+
+Both tools verify the CSR's self-signature before signing it -- bash gets
+this for free from `openssl ca`'s built-in check, python checks
+`csr.is_signature_valid` explicitly since `cryptography` doesn't do this on
+load -- so a tampered or malformed CSR is rejected, not silently accepted.
+
+`reissue` works differently for these entities: there's no
+chainsmith-managed key or subject to change, so `--rekey`/`--cn`/`--org`/
+etc. are rejected. A plain `reissue` re-signs the same stored CSR (new
+serial/validity, same subject); `--csr PATH` replaces it with a new one
+(e.g. the customer rotated their key). See
+[`examples/08-sign-external-csr`](examples/08-sign-external-csr/README.md).
+
+## Client certificate authentication (mTLS)
+
+Server certs default to `serverAuth` only. Pass `--eku client` to
+`issue-server`, `sign-csr`, or `reissue` to also include `clientAuth`, for
+certs that need to authenticate as both a TLS server and (e.g. in an mTLS
+setup) a client:
+
+```sh
+./chainsmith.sh issue-server --name web1 --ca int1 --cn app.example.com --eku client
+```
+
+Unlike `--adcs-quirk`, this is a durable property: it's stored in
+`meta.conf`, so a later plain `reissue` keeps the same EKU set. It also
+still applies to `sign-csr`-created entities' `reissue` (unlike the flags
+rejected for them above) since EKU is chainsmith-decided, not part of the
+submitted CSR. See
+[`examples/09-client-auth-eku`](examples/09-client-auth-eku/README.md).
 
 ## Simulating real-world CA bugs
 
@@ -198,10 +245,12 @@ against a CA the Python tool created).
 
 ## Examples
 
-Full walkthroughs (real commands, real captured output) for common
-scenarios -- multi-level CA chains, server cert variants, reissue/rekey,
-cross-tool interop, and the AD CS quirk simulation -- live under
-[`examples/`](examples/).
+Nine full walkthroughs (real commands, real captured output) live under
+[`examples/`](examples/): multi-level CA chains, server cert variants
+(SAN/EC/RSA/subject fields/wildcards), reissue/rekey, cross-tool interop,
+the AD CS quirk simulation, signing externally-generated CSRs, and mTLS
+client-auth certs. See [`examples/README.md`](examples/README.md) for the
+full index.
 
 ## Roadmap
 

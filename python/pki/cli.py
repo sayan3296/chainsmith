@@ -5,11 +5,12 @@ import datetime
 import sys
 
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.x509.oid import ExtensionOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID
 
 from . import ca, store
 
 _ADCS_QUIRK_FIELDS = {"CN", "O", "OU", "C", "ST", "L"}
+_EKU_OIDS = {"client": ExtendedKeyUsageOID.CLIENT_AUTH}
 
 _EXTENSION_NAMES = {
     ExtensionOID.BASIC_CONSTRAINTS: "basicConstraints",
@@ -69,6 +70,28 @@ def _parse_adcs_quirk(value):
     return fields
 
 
+def _validate_eku(value):
+    """Validates --eku's value (comma-separated additional EKU names to
+    include alongside the always-present serverAuth; currently only
+    'client' is supported). Returns the normalized string to store in
+    meta.conf ("" if not given)."""
+    if not value:
+        return ""
+    tokens = [t.strip().lower() for t in value.split(",") if t.strip()]
+    bad = [t for t in tokens if t not in _EKU_OIDS]
+    if bad:
+        die(f"unknown --eku value(s) {bad} (currently supported: {sorted(_EKU_OIDS)})")
+    return ",".join(tokens)
+
+
+def _eku_oids(value):
+    """Turns a validated, stored EKU string (see _validate_eku) into the
+    list of ExtendedKeyUsageOID values sign_from_csr expects."""
+    if not value:
+        return []
+    return [_EKU_OIDS[t] for t in value.split(",") if t]
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="chainsmith.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -94,6 +117,10 @@ def build_parser():
                     help="force the named subject field(s) (or 'all') to be "
                          "encoded as PrintableString regardless of charset, "
                          "reproducing a real-world Windows AD CS issuance bug")
+    p.add_argument("--eku", metavar="client",
+                    help="add clientAuth alongside the always-present "
+                         "serverAuth (mTLS-style certs); persisted to "
+                         "meta.conf, so it survives plain reissues")
     p.set_defaults(func=cmd_issue_server)
 
     p = sub.add_parser("sign-csr", help="sign an externally-generated CSR as a server cert")
@@ -101,6 +128,8 @@ def build_parser():
     p.add_argument("--ca", required=True, dest="ca_name")
     p.add_argument("--csr", required=True, help="path to a PEM-encoded CSR file")
     p.add_argument("--days", type=int)
+    p.add_argument("--eku", metavar="client",
+                    help="add clientAuth alongside the always-present serverAuth")
     p.set_defaults(func=cmd_sign_csr)
 
     p = sub.add_parser("reissue", help="reissue an existing CA or server cert")
@@ -118,6 +147,10 @@ def build_parser():
                          "Windows AD CS issuance bug")
     p.add_argument("--csr", help="sign-csr entities only -- path to a new "
                                   "PEM-encoded CSR to replace the stored one")
+    p.add_argument("--eku", metavar="client",
+                    help="server certs only -- add clientAuth alongside "
+                         "serverAuth; applies even to sign-csr entities "
+                         "since it's chainsmith-owned, not part of the CSR")
     p.set_defaults(func=cmd_reissue)
 
     p = sub.add_parser("list", help="list every entity in the store")
@@ -198,12 +231,14 @@ def cmd_issue_server(args):
         keysize, curve = "", args.curve or "prime256v1"
     days = str(args.days or 365)
 
+    eku = _validate_eku(args.eku)
+
     meta = {
         "NAME": name, "TYPE": "server", "PARENT": ca_name, "CN": cn,
         "ORG": args.org or "", "OU": args.ou or "", "COUNTRY": args.country or "",
         "STATE": args.state or "", "LOCALITY": args.locality or "",
         "KEYTYPE": keytype, "KEYSIZE": keysize, "CURVE": curve, "DAYS": days,
-        "SAN": san, "CREATED_AT": now_iso(), "REISSUE_COUNT": "0",
+        "SAN": san, "CREATED_AT": now_iso(), "REISSUE_COUNT": "0", "EKU": eku,
     }
 
     adcs_quirk_fields = _parse_adcs_quirk(args.adcs_quirk)
@@ -213,7 +248,7 @@ def cmd_issue_server(args):
     ca.write_private_key(name, key)
     csr = ca.build_csr(name, meta, key)
     ca.sign_from_csr(name, csr, ca_name, days, "server",
-                      adcs_quirk_fields=adcs_quirk_fields)
+                      adcs_quirk_fields=adcs_quirk_fields, extra_eku=_eku_oids(eku))
 
     store.meta_write(name, meta)
     store.build_chain(name)
@@ -240,17 +275,19 @@ def cmd_sign_csr(args):
         csr, raw = ca.load_external_csr(args.csr)
     except store.PkiError as e:
         die(str(e))
+    eku = _validate_eku(args.eku)
 
     meta = {
         "NAME": name, "TYPE": "server", "PARENT": ca_name, "CN": "",
         "ORG": "", "OU": "", "COUNTRY": "", "STATE": "", "LOCALITY": "",
         "KEYTYPE": "", "KEYSIZE": "", "CURVE": "", "DAYS": days, "SAN": "",
         "CREATED_AT": now_iso(), "REISSUE_COUNT": "0", "EXTERNAL_CSR": "1",
+        "EKU": eku,
     }
 
     store.mkdir_entity_skeleton(name)
     (store.entity_dir(name) / "csr" / f"{name}.csr.pem").write_bytes(raw)
-    ca.sign_from_csr(name, csr, ca_name, days, "server")
+    ca.sign_from_csr(name, csr, ca_name, days, "server", extra_eku=_eku_oids(eku))
 
     store.meta_write(name, meta)
     store.build_chain(name)
@@ -267,6 +304,9 @@ def cmd_reissue(args):
         die(f"--adcs-quirk only applies to server certificates "
             f"(entity '{name}' is type '{entity_type}')")
     adcs_quirk_fields = _parse_adcs_quirk(args.adcs_quirk)
+    if args.eku and entity_type != "server":
+        die(f"--eku only applies to server certificates "
+            f"(entity '{name}' is type '{entity_type}')")
 
     if is_external:
         bad = [flag for flag, val in (
@@ -302,6 +342,8 @@ def cmd_reissue(args):
         meta["LOCALITY"] = args.locality
     if args.days:
         meta["DAYS"] = str(args.days)
+    if args.eku:
+        meta["EKU"] = _validate_eku(args.eku)
     if args.keytype:
         meta["KEYTYPE"] = args.keytype
         if args.keytype == "rsa":
@@ -340,7 +382,8 @@ def cmd_reissue(args):
             except store.PkiError as e:
                 die(str(e))
         ca.sign_from_csr(name, csr, parent, meta["DAYS"], "server",
-                          adcs_quirk_fields=adcs_quirk_fields)
+                          adcs_quirk_fields=adcs_quirk_fields,
+                          extra_eku=_eku_oids(meta["EKU"]))
     else:
         if args.rekey:
             key = ca.generate_key(meta)
@@ -362,7 +405,8 @@ def cmd_reissue(args):
         elif entity_type == "server":
             csr = ca.build_csr(name, meta, key)
             ca.sign_from_csr(name, csr, parent, meta["DAYS"], "server",
-                              adcs_quirk_fields=adcs_quirk_fields)
+                              adcs_quirk_fields=adcs_quirk_fields,
+                              extra_eku=_eku_oids(meta["EKU"]))
         else:
             die(f"unknown entity type '{entity_type}' for '{name}'")
 

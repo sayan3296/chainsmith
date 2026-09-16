@@ -66,6 +66,30 @@ apply_adcs_quirk() {
       "to reject it."
 }
 
+# resolve_eku_extension RAW - validates RAW (empty, or a comma-separated
+# list of additional EKU names to include alongside the always-present
+# serverAuth; currently only "client" is supported) and echoes the
+# openssl.cnf extension section name to use for -extensions when signing a
+# server cert (see bash/templates/ca.cnf.tmpl: v3_server vs
+# v3_server_with_client_auth).
+resolve_eku_extension() {
+  local raw="$1" tok
+  if [[ -z "$raw" ]]; then
+    echo "v3_server"
+    return
+  fi
+  IFS=',' read -ra parts <<< "$raw"
+  for tok in "${parts[@]}"; do
+    tok="$(echo "$tok" | xargs)"
+    [[ -z "$tok" ]] && continue
+    case "${tok,,}" in
+      client) ;;
+      *) die "unknown --eku value '$tok' (currently supported: client)" ;;
+    esac
+  done
+  echo "v3_server_with_client_auth"
+}
+
 # prompt_if_missing VARNAME "Prompt text" "default value"
 # Reads from stdin into VARNAME if it is currently empty. When stdin isn't a
 # terminal (scripted/automated invocation), silently falls back to the
@@ -99,7 +123,7 @@ escape_meta_value() {
 
 # meta_write NAME - writes store/<NAME>/meta.conf from the current values of
 # TYPE, PARENT, CN, ORG, OU, COUNTRY, STATE, LOCALITY, KEYTYPE, KEYSIZE,
-# CURVE, DAYS, SAN, CREATED_AT, REISSUE_COUNT, EXTERNAL_CSR.
+# CURVE, DAYS, SAN, CREATED_AT, REISSUE_COUNT, EXTERNAL_CSR, EKU.
 meta_write() {
   local name="$1" dir
   dir="$(entity_dir "$name")"
@@ -121,6 +145,7 @@ meta_write() {
     echo "CREATED_AT=\"$(escape_meta_value "$CREATED_AT")\""
     echo "REISSUE_COUNT=\"$(escape_meta_value "$REISSUE_COUNT")\""
     echo "EXTERNAL_CSR=\"$(escape_meta_value "$EXTERNAL_CSR")\""
+    echo "EKU=\"$(escape_meta_value "$EKU")\""
   } > "$dir/meta.conf"
 }
 
@@ -132,7 +157,7 @@ meta_load() {
   [[ -f "$dir/meta.conf" ]] || die "unknown entity '$name' (no $dir/meta.conf)"
   NAME="" TYPE="" PARENT="" CN="" ORG="" OU="" COUNTRY="" STATE="" LOCALITY=""
   KEYTYPE="" KEYSIZE="" CURVE="" DAYS="" SAN="" CREATED_AT="" REISSUE_COUNT=""
-  EXTERNAL_CSR=""
+  EXTERNAL_CSR="" EKU=""
   # shellcheck disable=SC1090
   source "$dir/meta.conf"
 }

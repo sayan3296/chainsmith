@@ -15,7 +15,7 @@ CA_CNF_TEMPLATE = ROOT_DIR / "bash" / "templates" / "ca.cnf.tmpl"
 META_FIELDS = [
     "NAME", "TYPE", "PARENT", "CN", "ORG", "OU", "COUNTRY", "STATE",
     "LOCALITY", "KEYTYPE", "KEYSIZE", "CURVE", "DAYS", "SAN",
-    "CREATED_AT", "REISSUE_COUNT", "EXTERNAL_CSR",
+    "CREATED_AT", "REISSUE_COUNT", "EXTERNAL_CSR", "EKU",
 ]
 
 _META_LINE_RE = re.compile(r'^([A-Z_]+)="(.*)"$')

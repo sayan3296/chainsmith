@@ -23,32 +23,37 @@ Commands:
           [--san DNS:foo,DNS:bar,IP:1.2.3.4] [--keytype rsa|ec]
           [--keysize N] [--curve NAME] [--days N]
           [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
-          [--adcs-quirk FIELD[,FIELD...]|all]
+          [--adcs-quirk FIELD[,FIELD...]|all] [--eku client]
       Issues a leaf server certificate signed by ISSUING_CA. --adcs-quirk
       force-encodes the named subject field(s) (CN/O/OU/C/ST/L, or "all")
       as PrintableString regardless of charset, reproducing a real-world
       Windows AD CS issuance bug; requires python3+cryptography and is
-      one-off (not stored in meta.conf).
+      one-off (not stored in meta.conf). --eku client adds clientAuth
+      alongside the always-present serverAuth (mTLS-style certs); stored
+      in meta.conf, so it persists across plain reissues.
 
-  sign-csr --name NAME --ca ISSUING_CA --csr PATH [--days N]
+  sign-csr --name NAME --ca ISSUING_CA --csr PATH [--days N] [--eku client]
       Signs an externally-generated CSR (a foreign key, a subject the
       requester controls) as a server certificate, issued by ISSUING_CA
       (root or intermediate). Unlike issue-server, chainsmith never
       generates or holds a private key for this entity -- only the CSR
       (copied into csr/<name>.csr.pem) and the resulting certificate.
+      --eku behaves as in issue-server.
 
   reissue NAME [--rekey] [--days N] [--cn CN] [--san SAN] [--org O]
           [--ou OU] [--country C] [--state ST] [--locality L]
           [--keytype rsa|ec] [--keysize N] [--curve NAME]
-          [--adcs-quirk FIELD[,FIELD...]|all] [--csr PATH]
+          [--adcs-quirk FIELD[,FIELD...]|all] [--csr PATH] [--eku client]
       Re-issues an existing CA or server cert. Any flag not given falls
       back to the value already stored in that entity's meta.conf.
       Without --rekey the existing private key is reused; with --rekey a
       fresh keypair is generated first. --adcs-quirk (see issue-server)
-      only applies to server certs. For entities created via sign-csr,
-      --rekey/--cn/--san/etc. don't apply (there's no chainsmith-managed
-      key or subject to change) -- pass --csr PATH to replace the CSR
-      being re-signed, or omit it to just re-sign the existing one.
+      and --eku only apply to server certs. For entities created via
+      sign-csr, --rekey/--cn/--san/etc. don't apply (there's no
+      chainsmith-managed key or subject to change) -- pass --csr PATH to
+      replace the CSR being re-signed, or omit it to just re-sign the
+      existing one; --eku still applies since it's chainsmith-owned, not
+      part of the CSR.
 
   list
       Shows every entity in the store with its type, parent, key source
@@ -108,6 +113,7 @@ cmd_init_ca() {
   CREATED_AT="$(now_iso)"
   REISSUE_COUNT=0
   EXTERNAL_CSR=""
+  EKU=""
 
   mkdir_entity_skeleton "$name"
   generate_key "$name"
@@ -141,7 +147,7 @@ cmd_init_ca() {
 
 cmd_issue_server() {
   local name="" ca="" cn="" san="" keytype="" keysize="" curve="" days=""
-  local org="" ou="" country="" state="" locality="" adcs_quirk=""
+  local org="" ou="" country="" state="" locality="" adcs_quirk="" eku=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
@@ -158,6 +164,7 @@ cmd_issue_server() {
       --state) state="$2"; shift 2 ;;
       --locality) locality="$2"; shift 2 ;;
       --adcs-quirk) adcs_quirk="$2"; shift 2 ;;
+      --eku) eku="$2"; shift 2 ;;
       *) die "unknown option '$1' for issue-server" ;;
     esac
   done
@@ -166,6 +173,8 @@ cmd_issue_server() {
     validate_adcs_quirk_fields "$adcs_quirk"
     require_python_cryptography
   fi
+  local ext_section
+  ext_section="$(resolve_eku_extension "$eku")"
   [[ -e "$(entity_dir "$name")" ]] && die "'$name' already exists in the store; use reissue instead"
   [[ -n "$ca" ]] || die "issue-server requires --ca ISSUING_CA"
   [[ -f "$(entity_dir "$ca")/openssl.cnf" ]] || die "issuing CA '$ca' not found"
@@ -187,6 +196,7 @@ cmd_issue_server() {
   CREATED_AT="$(now_iso)"
   REISSUE_COUNT=0
   EXTERNAL_CSR=""
+  EKU="$eku"
 
   mkdir_entity_skeleton "$name"
   generate_key "$name"
@@ -201,7 +211,7 @@ cmd_issue_server() {
 
   openssl req -new -config "$dir/openssl.cnf" -key "$keyfile" \
     -subj "$(build_subject)" -out "$csrfile"
-  openssl ca -config "$parentcnf" -extensions v3_server \
+  openssl ca -config "$parentcnf" -extensions "$ext_section" \
     -days "$DAYS" -notext -batch -in "$csrfile" -out "$certfile"
   [[ -n "$adcs_quirk" ]] && apply_adcs_quirk "$name" "$adcs_quirk"
 
@@ -211,13 +221,14 @@ cmd_issue_server() {
 }
 
 cmd_sign_csr() {
-  local name="" ca="" csr="" days=""
+  local name="" ca="" csr="" days="" eku=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
       --ca) ca="$2"; shift 2 ;;
       --csr) csr="$2"; shift 2 ;;
       --days) days="$2"; shift 2 ;;
+      --eku) eku="$2"; shift 2 ;;
       *) die "unknown option '$1' for sign-csr" ;;
     esac
   done
@@ -227,6 +238,8 @@ cmd_sign_csr() {
   [[ -f "$(entity_dir "$ca")/openssl.cnf" ]] || die "issuing CA '$ca' not found"
   [[ -n "$csr" ]] || die "sign-csr requires --csr PATH"
   [[ -f "$csr" ]] || die "CSR file not found: '$csr'"
+  local ext_section
+  ext_section="$(resolve_eku_extension "$eku")"
 
   TYPE="server"; PARENT="$ca"
   CN=""; ORG=""; OU=""; COUNTRY=""; STATE=""; LOCALITY=""; SAN=""
@@ -235,6 +248,7 @@ cmd_sign_csr() {
   CREATED_AT="$(now_iso)"
   REISSUE_COUNT=0
   EXTERNAL_CSR=1
+  EKU="$eku"
 
   mkdir_entity_skeleton "$name"
   local dir csrfile certfile parentcnf
@@ -244,7 +258,7 @@ cmd_sign_csr() {
   parentcnf="$(entity_dir "$ca")/openssl.cnf"
   cp "$csr" "$csrfile"
 
-  openssl ca -config "$parentcnf" -extensions v3_server \
+  openssl ca -config "$parentcnf" -extensions "$ext_section" \
     -days "$DAYS" -notext -batch -in "$csrfile" -out "$certfile"
 
   meta_write "$name"
@@ -262,7 +276,7 @@ cmd_reissue() {
   local rekey=0
 
   local days="" cn="" san="" org="" ou="" country="" state="" locality=""
-  local keytype="" keysize="" curve="" adcs_quirk="" new_csr=""
+  local keytype="" keysize="" curve="" adcs_quirk="" new_csr="" eku=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --rekey) rekey=1; shift ;;
@@ -279,6 +293,7 @@ cmd_reissue() {
       --curve) curve="$2"; shift 2 ;;
       --adcs-quirk) adcs_quirk="$2"; shift 2 ;;
       --csr) new_csr="$2"; shift 2 ;;
+      --eku) eku="$2"; shift 2 ;;
       *) die "unknown option '$1' for reissue" ;;
     esac
   done
@@ -287,6 +302,9 @@ cmd_reissue() {
     [[ "$orig_type" == "server" ]] || die "--adcs-quirk only applies to server certificates ('$name' is type '$orig_type')"
     validate_adcs_quirk_fields "$adcs_quirk"
     require_python_cryptography
+  fi
+  if [[ -n "$eku" ]]; then
+    [[ "$orig_type" == "server" ]] || die "--eku only applies to server certificates ('$name' is type '$orig_type')"
   fi
 
   if [[ -n "$orig_external" ]]; then
@@ -309,6 +327,7 @@ cmd_reissue() {
   [[ -n "$state" ]] && STATE="$state"
   [[ -n "$locality" ]] && LOCALITY="$locality"
   [[ -n "$days" ]] && DAYS="$days"
+  [[ -n "$eku" ]] && EKU="$eku"
   if [[ -n "$keytype" ]]; then
     KEYTYPE="$keytype"
     if [[ "$KEYTYPE" == "rsa" ]]; then
@@ -330,6 +349,9 @@ cmd_reissue() {
     fi
   fi
 
+  local ext_section
+  ext_section="$(resolve_eku_extension "$EKU")"
+
   archive_entity "$name"
   REISSUE_COUNT=$((REISSUE_COUNT + 1))
 
@@ -345,7 +367,7 @@ cmd_reissue() {
       cp "$new_csr" "$csrfile"
     fi
     openssl ca -config "$(entity_dir "$PARENT")/openssl.cnf" \
-      -extensions v3_server -days "$DAYS" -notext -batch \
+      -extensions "$ext_section" -days "$DAYS" -notext -batch \
       -in "$csrfile" -out "$certfile"
     [[ -n "$adcs_quirk" ]] && apply_adcs_quirk "$name" "$adcs_quirk"
   else
@@ -377,7 +399,7 @@ cmd_reissue() {
         openssl req -new -config "$dir/openssl.cnf" -key "$keyfile" \
           -subj "$(build_subject)" -out "$csrfile"
         openssl ca -config "$(entity_dir "$PARENT")/openssl.cnf" \
-          -extensions v3_server -days "$DAYS" -notext -batch \
+          -extensions "$ext_section" -days "$DAYS" -notext -batch \
           -in "$csrfile" -out "$certfile"
         [[ -n "$adcs_quirk" ]] && apply_adcs_quirk "$name" "$adcs_quirk"
         ;;

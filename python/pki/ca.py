@@ -170,7 +170,8 @@ def self_sign_root(name, meta, key):
     return cert
 
 
-def sign_from_csr(name, csr, parent_name, days, extension_kind, adcs_quirk_fields=None):
+def sign_from_csr(name, csr, parent_name, days, extension_kind, adcs_quirk_fields=None,
+                   extra_eku=None):
     """Signs `csr` with parent_name's key, writes certs/<name>.cert.pem, and
     records the issuance in the parent's index.txt/serial/newcerts (the same
     bookkeeping `openssl ca` performs, so bash and python stay interoperable).
@@ -180,6 +181,10 @@ def sign_from_csr(name, csr, parent_name, days, extension_kind, adcs_quirk_field
     _DN_OID_ORDER) to force-encode as PrintableString regardless of charset,
     reproducing a real-world Windows AD CS issuance bug (see
     _adcs_retag_subject).
+
+    extra_eku, if given (extension_kind == 'server' only), is a list of
+    additional ExtendedKeyUsageOID values to include alongside the
+    always-present SERVER_AUTH (e.g. CLIENT_AUTH for mTLS-style certs).
     """
     parent_key = load_private_key(parent_name)
     parent_cert = load_cert(parent_name)
@@ -231,7 +236,8 @@ def sign_from_csr(name, csr, parent_name, days, extension_kind, adcs_quirk_field
                           key_agreement=False, encipher_only=False, decipher_only=False),
             critical=True,
         ).add_extension(
-            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, *(extra_eku or [])]),
+            critical=False,
         )
     else:
         raise store.PkiError(f"unknown extension_kind '{extension_kind}'")
