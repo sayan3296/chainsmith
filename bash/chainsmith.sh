@@ -188,7 +188,7 @@ cmd_issue_server() {
   ORG="$org"; OU="$ou"; COUNTRY="$country"; STATE="$state"; LOCALITY="$locality"
   KEYTYPE="${keytype:-rsa}"
   if [[ "$KEYTYPE" == "rsa" ]]; then
-    KEYSIZE="${keysize:-2048}"; CURVE=""
+    KEYSIZE="${keysize:-4096}"; CURVE=""
   else
     KEYSIZE=""; CURVE="${curve:-prime256v1}"
   fi
@@ -331,7 +331,7 @@ cmd_reissue() {
   if [[ -n "$keytype" ]]; then
     KEYTYPE="$keytype"
     if [[ "$KEYTYPE" == "rsa" ]]; then
-      KEYSIZE="${keysize:-${KEYSIZE:-2048}}"; CURVE=""
+      KEYSIZE="${keysize:-${KEYSIZE:-4096}}"; CURVE=""
     else
       KEYSIZE=""; CURVE="${curve:-${CURVE:-prime256v1}}"
     fi
