@@ -99,7 +99,7 @@ escape_meta_value() {
 
 # meta_write NAME - writes store/<NAME>/meta.conf from the current values of
 # TYPE, PARENT, CN, ORG, OU, COUNTRY, STATE, LOCALITY, KEYTYPE, KEYSIZE,
-# CURVE, DAYS, SAN, CREATED_AT, REISSUE_COUNT.
+# CURVE, DAYS, SAN, CREATED_AT, REISSUE_COUNT, EXTERNAL_CSR.
 meta_write() {
   local name="$1" dir
   dir="$(entity_dir "$name")"
@@ -120,6 +120,7 @@ meta_write() {
     echo "SAN=\"$(escape_meta_value "$SAN")\""
     echo "CREATED_AT=\"$(escape_meta_value "$CREATED_AT")\""
     echo "REISSUE_COUNT=\"$(escape_meta_value "$REISSUE_COUNT")\""
+    echo "EXTERNAL_CSR=\"$(escape_meta_value "$EXTERNAL_CSR")\""
   } > "$dir/meta.conf"
 }
 
@@ -131,6 +132,7 @@ meta_load() {
   [[ -f "$dir/meta.conf" ]] || die "unknown entity '$name' (no $dir/meta.conf)"
   NAME="" TYPE="" PARENT="" CN="" ORG="" OU="" COUNTRY="" STATE="" LOCALITY=""
   KEYTYPE="" KEYSIZE="" CURVE="" DAYS="" SAN="" CREATED_AT="" REISSUE_COUNT=""
+  EXTERNAL_CSR=""
   # shellcheck disable=SC1090
   source "$dir/meta.conf"
 }

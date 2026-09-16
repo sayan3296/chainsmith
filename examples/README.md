@@ -19,6 +19,9 @@ intermediate) and ends with a cleanup step -- these run against the real
   a wildcard domain in CN and SAN.
 - [`07-multiple-wildcard-sans`](07-multiple-wildcard-sans/README.md) --
   one cert covering several distinct wildcard domains via a multi-entry SAN.
+- [`08-sign-external-csr`](08-sign-external-csr/README.md) --
+  signing a CSR generated outside chainsmith (a customer's own key/subject)
+  against a root or intermediate, and how `reissue` differs for it.
 
 See the top-level [`README.md`](../README.md) for command reference and
 defaults.

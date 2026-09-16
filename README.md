@@ -59,13 +59,53 @@ store/<name>/
 
 ## Commands
 
-- `init-ca --name NAME [--parent PARENT] --cn CN [--keytype rsa|ec] [--keysize N | --curve NAME] [--days N] [--org O] [--ou OU] [--country C] [--state ST] [--locality L]`
-- `issue-server --name NAME --ca ISSUING_CA --cn CN [--san DNS:foo,IP:1.2.3.4] [--keytype rsa|ec] [--keysize N | --curve NAME] [--days N] [--org O] [--ou OU] [--country C] [--state ST] [--locality L] [--adcs-quirk FIELD[,FIELD...]|all]`
-- `reissue NAME [--rekey] [--days N] [--cn CN] [--san SAN] [--org O] [--ou OU] [--country C] [--state ST] [--locality L] [--keytype rsa|ec] [--keysize N] [--curve NAME] [--adcs-quirk FIELD[,FIELD...]|all]`
-- `list`
-- `show NAME`
+```
+init-ca --name NAME [--parent PARENT] --cn CN
+        [--keytype rsa|ec] [--keysize N | --curve NAME] [--days N]
+        [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
+```
+Creates a root CA (no `--parent`) or an intermediate CA (`--parent` an
+existing CA).
 
-(`--adcs-quirk` is a corruption-simulation flag for server certs only — see "Simulating real-world CA bugs" below.)
+```
+issue-server --name NAME --ca ISSUING_CA --cn CN
+             [--san DNS:foo,IP:1.2.3.4] [--keytype rsa|ec]
+             [--keysize N | --curve NAME] [--days N]
+             [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
+             [--adcs-quirk FIELD[,FIELD...]|all]
+```
+Issues a leaf server certificate signed by `ISSUING_CA`. `--adcs-quirk`
+is a corruption-simulation flag (server certs only) — see "Simulating
+real-world CA bugs" below.
+
+```
+sign-csr --name NAME --ca ISSUING_CA --csr PATH [--days N]
+```
+Signs a CSR generated outside chainsmith (e.g. a customer's own
+key/subject) as a server certificate, issued by `ISSUING_CA` (root or
+intermediate). Chainsmith never holds a private key for the result.
+
+```
+reissue NAME [--rekey] [--days N] [--cn CN] [--san SAN]
+        [--org O] [--ou OU] [--country C] [--state ST] [--locality L]
+        [--keytype rsa|ec] [--keysize N] [--curve NAME]
+        [--adcs-quirk FIELD[,FIELD...]|all] [--csr PATH]
+```
+Re-issues an existing CA or server cert; any flag not given falls back
+to what's stored in `meta.conf`. `--csr PATH` only applies to
+`sign-csr`-created entities, replacing `--rekey`/subject/key flags
+(which don't apply there — see `examples/08-sign-external-csr`).
+
+```
+list
+```
+Every entity in the store, with type, parent, key source (`local` vs
+`external`), and expiry.
+
+```
+show NAME
+```
+Prints the decoded certificate (`openssl x509 -text`).
 
 `reissue` never re-prompts: any flag you don't pass falls back to what's
 already stored in that entity's `meta.conf`. Edit `meta.conf` by hand and
@@ -155,6 +195,13 @@ This works because both tools write the same `meta.conf`, the same
 `bash/templates/ca.cnf.tmpl` even though it never shells out to `openssl`
 itself -- purely so the bash tool can later use `openssl ca`/`openssl req`
 against a CA the Python tool created).
+
+## Examples
+
+Full walkthroughs (real commands, real captured output) for common
+scenarios -- multi-level CA chains, server cert variants, reissue/rekey,
+cross-tool interop, and the AD CS quirk simulation -- live under
+[`examples/`](examples/).
 
 ## Roadmap
 

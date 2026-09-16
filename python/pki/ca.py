@@ -116,6 +116,28 @@ def build_csr(name, meta, key):
     return csr
 
 
+def load_external_csr(path):
+    """Loads and validates a CSR generated outside chainsmith (sign-csr).
+    Returns (csr, raw_bytes) -- raw_bytes is written verbatim to
+    csr/<name>.csr.pem rather than re-serialized, to preserve exactly what
+    was submitted. Unlike bash's `openssl ca` (which verifies a CSR's
+    self-signature automatically before issuing), `cryptography` does not
+    check this on load, so it's done explicitly here to keep both tools'
+    behavior aligned.
+    """
+    try:
+        raw = open(path, "rb").read()
+    except OSError as e:
+        raise store.PkiError(f"failed to read CSR '{path}': {e}")
+    try:
+        csr = x509.load_pem_x509_csr(raw)
+    except ValueError as e:
+        raise store.PkiError(f"failed to parse CSR '{path}': {e}")
+    if not csr.is_signature_valid:
+        raise store.PkiError(f"CSR '{path}' signature does not verify")
+    return csr, raw
+
+
 def _write_cert(name, cert):
     path = store.entity_dir(name) / "certs" / f"{name}.cert.pem"
     path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
