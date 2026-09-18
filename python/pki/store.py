@@ -4,7 +4,9 @@ Both tools operate on the same store/ directory using the standard OpenSSL
 CA conventions (index.txt/serial/newcerts) so a CA created by one tool can
 issue or be issued from by the other.
 """
+import contextlib
 import datetime
+import fcntl
 import re
 from pathlib import Path
 
@@ -123,6 +125,22 @@ def init_ca_bookkeeping(name):
     (d / "index.txt.attr").write_text("unique_subject = no\n")
     (d / "serial").write_text("1000\n")
     (d / "crlnumber").write_text("1000\n")
+
+
+@contextlib.contextmanager
+def ca_lock(ca_name):
+    """Exclusive flock() on store/<ca_name>/.serial.lock -- same lock file
+    and lock type (flock, not fcntl byte-range) that the bash tool uses, so
+    issuance against a CA (serial/index.txt/newcerts bookkeeping) is
+    serialized across processes and across the bash/python tools sharing
+    this store."""
+    path = entity_dir(ca_name) / ".serial.lock"
+    with open(path, "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def read_serial(ca_name):

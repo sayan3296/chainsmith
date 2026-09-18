@@ -33,11 +33,45 @@ validate_adcs_quirk_fields() {
   done
 }
 
+# validate_positive_int VALUE LABEL - dies unless VALUE is a positive
+# integer (no sign, no leading zero). LABEL names the flag/field in the
+# error message.
+validate_positive_int() {
+  local value="$1" label="$2"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$label must be a positive integer (got '$value')"
+}
+
 # require_python_cryptography - lazy check, only called when --adcs-quirk is
 # actually used. Every other command path in this tool stays python-free.
 require_python_cryptography() {
   command -v python3 >/dev/null 2>&1 || die "--adcs-quirk requires python3 (only for this flag; no other command needs it)"
   python3 -c "import cryptography" >/dev/null 2>&1 || die "--adcs-quirk requires the python 'cryptography' package (pip install cryptography)"
+}
+
+# require_flock - lazy check, only called when a CA-bookkeeping lock is
+# actually about to be taken.
+require_flock() {
+  command -v flock >/dev/null 2>&1 || die "flock not found in PATH (required to serialize CA issuance)"
+}
+
+# ca_lock_acquire CA_NAME - opens store/<CA_NAME>/.serial.lock and blocks
+# until an exclusive flock is held, serializing issuance against that CA
+# (serial/index.txt/newcerts bookkeeping) across processes and across the
+# bash/python tools, since both lock the same path with flock(). Sets
+# CA_LOCK_FD (deliberately not `local`) for ca_lock_release to close.
+ca_lock_acquire() {
+  local ca_name="$1"
+  require_flock
+  exec {CA_LOCK_FD}>"$(entity_dir "$ca_name")/.serial.lock"
+  flock -x "$CA_LOCK_FD"
+}
+
+# ca_lock_release - releases the lock taken by ca_lock_acquire.
+ca_lock_release() {
+  [[ -n "${CA_LOCK_FD:-}" ]] || return 0
+  flock -u "$CA_LOCK_FD"
+  exec {CA_LOCK_FD}>&-
+  unset CA_LOCK_FD
 }
 
 # apply_adcs_quirk NAME FIELDS - post-processes the just-issued
@@ -121,6 +155,16 @@ escape_meta_value() {
   printf '%s' "$v"
 }
 
+# escape_subj_value VALUE -> escapes backslash, '/', and '=' so VALUE can't
+# inject extra RDNs or bogus keys when embedded in an openssl -subj string.
+escape_subj_value() {
+  local v="$1"
+  v="${v//\\/\\\\}"
+  v="${v//\//\\/}"
+  v="${v//=/\\=}"
+  printf '%s' "$v"
+}
+
 # meta_write NAME - writes store/<NAME>/meta.conf from the current values of
 # TYPE, PARENT, CN, ORG, OU, COUNTRY, STATE, LOCALITY, KEYTYPE, KEYSIZE,
 # CURVE, DAYS, SAN, CREATED_AT, REISSUE_COUNT, EXTERNAL_CSR, EKU.
@@ -182,12 +226,12 @@ archive_entity() {
 # build_subject -> prints an OpenSSL -subj string from CN/ORG/OU/COUNTRY/STATE/LOCALITY
 build_subject() {
   local subj=""
-  [[ -n "$COUNTRY" ]] && subj+="/C=$COUNTRY"
-  [[ -n "$STATE" ]] && subj+="/ST=$STATE"
-  [[ -n "$LOCALITY" ]] && subj+="/L=$LOCALITY"
-  [[ -n "$ORG" ]] && subj+="/O=$ORG"
-  [[ -n "$OU" ]] && subj+="/OU=$OU"
-  subj+="/CN=$CN"
+  [[ -n "$COUNTRY" ]] && subj+="/C=$(escape_subj_value "$COUNTRY")"
+  [[ -n "$STATE" ]] && subj+="/ST=$(escape_subj_value "$STATE")"
+  [[ -n "$LOCALITY" ]] && subj+="/L=$(escape_subj_value "$LOCALITY")"
+  [[ -n "$ORG" ]] && subj+="/O=$(escape_subj_value "$ORG")"
+  [[ -n "$OU" ]] && subj+="/OU=$(escape_subj_value "$OU")"
+  subj+="/CN=$(escape_subj_value "$CN")"
   printf '%s' "$subj"
 }
 

@@ -84,6 +84,18 @@ def _validate_eku(value):
     return ",".join(tokens)
 
 
+def _validate_positive_int(value, label):
+    """Validates value (an int from argparse, or a numeric string pulled
+    from meta.conf) is a positive integer. Returns it as an int."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        die(f"{label} must be a positive integer (got {value!r})")
+    if n <= 0:
+        die(f"{label} must be a positive integer (got {value!r})")
+    return n
+
+
 def _eku_oids(value):
     """Turns a validated, stored EKU string (see _validate_eku) into the
     list of ExtendedKeyUsageOID values sign_from_csr expects."""
@@ -181,10 +193,12 @@ def cmd_init_ca(args):
 
     keytype = args.keytype or "rsa"
     if keytype == "rsa":
-        keysize, curve = str(args.keysize or 4096), ""
+        keysize = args.keysize if args.keysize is not None else 4096
+        keysize, curve = str(_validate_positive_int(keysize, "--keysize")), ""
     else:
         keysize, curve = "", args.curve or "secp384r1"
-    days = str(args.days or (7300 if entity_type == "root" else 3650))
+    days = args.days if args.days is not None else (7300 if entity_type == "root" else 3650)
+    days = str(_validate_positive_int(days, "--days"))
 
     meta = {
         "NAME": name, "TYPE": entity_type, "PARENT": args.parent or "", "CN": cn,
@@ -226,10 +240,12 @@ def cmd_issue_server(args):
 
     keytype = args.keytype or "rsa"
     if keytype == "rsa":
-        keysize, curve = str(args.keysize or 4096), ""
+        keysize = args.keysize if args.keysize is not None else 4096
+        keysize, curve = str(_validate_positive_int(keysize, "--keysize")), ""
     else:
         keysize, curve = "", args.curve or "prime256v1"
-    days = str(args.days or 365)
+    days = args.days if args.days is not None else 365
+    days = str(_validate_positive_int(days, "--days"))
 
     eku = _validate_eku(args.eku)
 
@@ -270,7 +286,8 @@ def cmd_sign_csr(args):
     if not (store.entity_dir(ca_name) / "meta.conf").is_file():
         die(f"issuing CA '{ca_name}' not found")
 
-    days = str(args.days or 365)
+    days = args.days if args.days is not None else 365
+    days = str(_validate_positive_int(days, "--days"))
     try:
         csr, raw = ca.load_external_csr(args.csr)
     except store.PkiError as e:
@@ -340,23 +357,27 @@ def cmd_reissue(args):
         meta["STATE"] = args.state
     if args.locality:
         meta["LOCALITY"] = args.locality
-    if args.days:
+    if args.days is not None:
         meta["DAYS"] = str(args.days)
+    _validate_positive_int(meta["DAYS"], "--days")
     if args.eku:
         meta["EKU"] = _validate_eku(args.eku)
     if args.keytype:
         meta["KEYTYPE"] = args.keytype
         if args.keytype == "rsa":
-            meta["KEYSIZE"] = str(args.keysize or meta["KEYSIZE"] or 4096)
+            keysize = args.keysize if args.keysize is not None else (meta["KEYSIZE"] or 4096)
+            meta["KEYSIZE"] = str(keysize)
             meta["CURVE"] = ""
         else:
             meta["KEYSIZE"] = ""
             meta["CURVE"] = args.curve or meta["CURVE"] or "prime256v1"
     else:
-        if args.keysize:
+        if args.keysize is not None:
             meta["KEYSIZE"] = str(args.keysize)
         if args.curve:
             meta["CURVE"] = args.curve
+    if meta["KEYTYPE"] == "rsa":
+        _validate_positive_int(meta["KEYSIZE"], "--keysize")
 
     if entity_type in ("root", "intermediate"):
         new_subject = {k: meta[k] for k in orig_subject}
