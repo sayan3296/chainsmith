@@ -188,68 +188,70 @@ def sign_from_csr(name, csr, parent_name, days, extension_kind, adcs_quirk_field
     """
     parent_key = load_private_key(parent_name)
     parent_cert = load_cert(parent_name)
-    serial_hex = format(store.read_serial(parent_name), "X")
-    serial_int = int(serial_hex, 16)
-    now = datetime.datetime.now(datetime.timezone.utc)
-    not_after = now + datetime.timedelta(days=int(days))
 
     subject = csr.subject
     if adcs_quirk_fields:
         subject = _adcs_retag_subject(subject, adcs_quirk_fields)
 
-    builder = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(parent_cert.subject)
-        .public_key(csr.public_key())
-        .serial_number(serial_int)
-        .not_valid_before(now)
-        .not_valid_after(not_after)
-        .add_extension(x509.SubjectKeyIdentifier.from_public_key(csr.public_key()), critical=False)
-        .add_extension(
-            x509.AuthorityKeyIdentifier.from_issuer_public_key(parent_key.public_key()),
-            critical=False,
-        )
-    )
+    with store.ca_lock(parent_name):
+        serial_hex = format(store.read_serial(parent_name), "X")
+        serial_int = int(serial_hex, 16)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        not_after = now + datetime.timedelta(days=int(days))
 
-    if extension_kind == "intermediate_ca":
-        builder = builder.add_extension(
-            x509.BasicConstraints(ca=True, path_length=None), critical=True
-        ).add_extension(
-            x509.KeyUsage(digital_signature=True, key_cert_sign=True, crl_sign=True,
-                          content_commitment=False, key_encipherment=False,
-                          data_encipherment=False, key_agreement=False,
-                          encipher_only=False, decipher_only=False),
-            critical=True,
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(parent_cert.subject)
+            .public_key(csr.public_key())
+            .serial_number(serial_int)
+            .not_valid_before(now)
+            .not_valid_after(not_after)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(csr.public_key()), critical=False)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(parent_key.public_key()),
+                critical=False,
+            )
         )
-    elif extension_kind == "server":
-        try:
-            san_ext = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-            builder = builder.add_extension(san_ext.value, critical=False)
-        except x509.ExtensionNotFound:
-            pass
-        builder = builder.add_extension(
-            x509.BasicConstraints(ca=False, path_length=None), critical=False
-        ).add_extension(
-            x509.KeyUsage(digital_signature=True, key_encipherment=True, key_cert_sign=False,
-                          crl_sign=False, content_commitment=False, data_encipherment=False,
-                          key_agreement=False, encipher_only=False, decipher_only=False),
-            critical=True,
-        ).add_extension(
-            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, *(extra_eku or [])]),
-            critical=False,
-        )
-    else:
-        raise store.PkiError(f"unknown extension_kind '{extension_kind}'")
 
-    cert = builder.sign(parent_key, hashes.SHA256())
-    _write_cert(name, cert)
+        if extension_kind == "intermediate_ca":
+            builder = builder.add_extension(
+                x509.BasicConstraints(ca=True, path_length=None), critical=True
+            ).add_extension(
+                x509.KeyUsage(digital_signature=True, key_cert_sign=True, crl_sign=True,
+                              content_commitment=False, key_encipherment=False,
+                              data_encipherment=False, key_agreement=False,
+                              encipher_only=False, decipher_only=False),
+                critical=True,
+            )
+        elif extension_kind == "server":
+            try:
+                san_ext = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+                builder = builder.add_extension(san_ext.value, critical=False)
+            except x509.ExtensionNotFound:
+                pass
+            builder = builder.add_extension(
+                x509.BasicConstraints(ca=False, path_length=None), critical=False
+            ).add_extension(
+                x509.KeyUsage(digital_signature=True, key_encipherment=True, key_cert_sign=False,
+                              crl_sign=False, content_commitment=False, data_encipherment=False,
+                              key_agreement=False, encipher_only=False, decipher_only=False),
+                critical=True,
+            ).add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, *(extra_eku or [])]),
+                critical=False,
+            )
+        else:
+            raise store.PkiError(f"unknown extension_kind '{extension_kind}'")
 
-    newcerts_path = store.entity_dir(parent_name) / "newcerts" / f"{serial_hex}.pem"
-    newcerts_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    store.append_index_entry(parent_name, serial_hex, not_after, name_to_dn(csr.subject))
-    store.bump_serial(parent_name)
-    return cert
+        cert = builder.sign(parent_key, hashes.SHA256())
+        _write_cert(name, cert)
+
+        newcerts_path = store.entity_dir(parent_name) / "newcerts" / f"{serial_hex}.pem"
+        newcerts_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        store.append_index_entry(parent_name, serial_hex, not_after, name_to_dn(csr.subject))
+        store.bump_serial(parent_name)
+        return cert
 
 
 _DN_OID_ORDER = (

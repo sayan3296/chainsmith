@@ -101,6 +101,7 @@ cmd_init_ca() {
   KEYTYPE="${keytype:-rsa}"
   if [[ "$KEYTYPE" == "rsa" ]]; then
     KEYSIZE="${keysize:-4096}"; CURVE=""
+    validate_positive_int "$KEYSIZE" "--keysize"
   else
     KEYSIZE=""; CURVE="${curve:-secp384r1}"
   fi
@@ -109,6 +110,7 @@ cmd_init_ca() {
   else
     DAYS="${days:-3650}"
   fi
+  validate_positive_int "$DAYS" "--days"
   SAN=""
   CREATED_AT="$(now_iso)"
   REISSUE_COUNT=0
@@ -135,8 +137,10 @@ cmd_init_ca() {
     parentcnf="$(entity_dir "$parent")/openssl.cnf"
     openssl req -new -config "$dir/openssl.cnf" -key "$keyfile" \
       -subj "$(build_subject)" -out "$csrfile"
+    ca_lock_acquire "$parent"
     openssl ca -config "$parentcnf" -extensions v3_intermediate_ca \
       -days "$DAYS" -notext -batch -in "$csrfile" -out "$certfile"
+    ca_lock_release
     init_ca_bookkeeping "$name"
   fi
 
@@ -189,10 +193,12 @@ cmd_issue_server() {
   KEYTYPE="${keytype:-rsa}"
   if [[ "$KEYTYPE" == "rsa" ]]; then
     KEYSIZE="${keysize:-4096}"; CURVE=""
+    validate_positive_int "$KEYSIZE" "--keysize"
   else
     KEYSIZE=""; CURVE="${curve:-prime256v1}"
   fi
   DAYS="${days:-365}"
+  validate_positive_int "$DAYS" "--days"
   CREATED_AT="$(now_iso)"
   REISSUE_COUNT=0
   EXTERNAL_CSR=""
@@ -211,9 +217,11 @@ cmd_issue_server() {
 
   openssl req -new -config "$dir/openssl.cnf" -key "$keyfile" \
     -subj "$(build_subject)" -out "$csrfile"
+  ca_lock_acquire "$ca"
   openssl ca -config "$parentcnf" -extensions "$ext_section" \
     -days "$DAYS" -notext -batch -in "$csrfile" -out "$certfile"
   [[ -n "$adcs_quirk" ]] && apply_adcs_quirk "$name" "$adcs_quirk"
+  ca_lock_release
 
   meta_write "$name"
   build_chain "$name"
@@ -245,6 +253,7 @@ cmd_sign_csr() {
   CN=""; ORG=""; OU=""; COUNTRY=""; STATE=""; LOCALITY=""; SAN=""
   KEYTYPE=""; KEYSIZE=""; CURVE=""
   DAYS="${days:-365}"
+  validate_positive_int "$DAYS" "--days"
   CREATED_AT="$(now_iso)"
   REISSUE_COUNT=0
   EXTERNAL_CSR=1
@@ -258,8 +267,10 @@ cmd_sign_csr() {
   parentcnf="$(entity_dir "$ca")/openssl.cnf"
   cp "$csr" "$csrfile"
 
+  ca_lock_acquire "$ca"
   openssl ca -config "$parentcnf" -extensions "$ext_section" \
     -days "$DAYS" -notext -batch -in "$csrfile" -out "$certfile"
+  ca_lock_release
 
   meta_write "$name"
   build_chain "$name"
@@ -327,6 +338,7 @@ cmd_reissue() {
   [[ -n "$state" ]] && STATE="$state"
   [[ -n "$locality" ]] && LOCALITY="$locality"
   [[ -n "$days" ]] && DAYS="$days"
+  validate_positive_int "$DAYS" "--days"
   [[ -n "$eku" ]] && EKU="$eku"
   if [[ -n "$keytype" ]]; then
     KEYTYPE="$keytype"
@@ -339,6 +351,7 @@ cmd_reissue() {
     [[ -n "$keysize" ]] && KEYSIZE="$keysize"
     [[ -n "$curve" ]] && CURVE="$curve"
   fi
+  [[ "$KEYTYPE" == "rsa" ]] && validate_positive_int "$KEYSIZE" "--keysize"
 
   if [[ "$TYPE" == "root" || "$TYPE" == "intermediate" ]]; then
     if [[ "$CN" != "$orig_cn" || "$ORG" != "$orig_org" || "$OU" != "$orig_ou" || \
@@ -366,10 +379,12 @@ cmd_reissue() {
       [[ -f "$new_csr" ]] || die "CSR file not found: '$new_csr'"
       cp "$new_csr" "$csrfile"
     fi
+    ca_lock_acquire "$PARENT"
     openssl ca -config "$(entity_dir "$PARENT")/openssl.cnf" \
       -extensions "$ext_section" -days "$DAYS" -notext -batch \
       -in "$csrfile" -out "$certfile"
     [[ -n "$adcs_quirk" ]] && apply_adcs_quirk "$name" "$adcs_quirk"
+    ca_lock_release
   else
     if [[ "$rekey" -eq 1 ]]; then
       generate_key "$name"
@@ -390,18 +405,22 @@ cmd_reissue() {
         render_ca_config "$name"
         openssl req -new -config "$dir/openssl.cnf" -key "$keyfile" \
           -subj "$(build_subject)" -out "$csrfile"
+        ca_lock_acquire "$PARENT"
         openssl ca -config "$(entity_dir "$PARENT")/openssl.cnf" \
           -extensions v3_intermediate_ca -days "$DAYS" -notext -batch \
           -in "$csrfile" -out "$certfile"
+        ca_lock_release
         ;;
       server)
         render_leaf_config "$name"
         openssl req -new -config "$dir/openssl.cnf" -key "$keyfile" \
           -subj "$(build_subject)" -out "$csrfile"
+        ca_lock_acquire "$PARENT"
         openssl ca -config "$(entity_dir "$PARENT")/openssl.cnf" \
           -extensions "$ext_section" -days "$DAYS" -notext -batch \
           -in "$csrfile" -out "$certfile"
         [[ -n "$adcs_quirk" ]] && apply_adcs_quirk "$name" "$adcs_quirk"
+        ca_lock_release
         ;;
       *) die "unknown entity type '$TYPE' for '$name'" ;;
     esac
